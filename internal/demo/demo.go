@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/norandom/restic-pve/internal/retro"
+	"github.com/norandom/restic-pve/blockview"
+	"github.com/norandom/restic-pve/retro"
 	"github.com/rivo/tview"
 	"golang.org/x/term"
 )
@@ -158,18 +159,12 @@ type View struct {
 	Elapsed time.Duration
 }
 
-// Legend is what the map's cells mean in the backup view.
-var Legend = []retro.LegendEntry{
-	{State: retro.Data, Text: "Has data"}, {State: retro.Empty, Text: "Empty"},
-	{State: retro.Reading, Text: "Reading"}, {State: retro.Writing, Text: "Writing"},
-	{State: retro.Done, Text: "In backup"},
-}
+// Legend is what the map's cells mean in the demo: the legend of the real view without "Not
+// read yet", since the made-up disk is known from the start.
+var Legend = blockview.Legend[:5]
 
 // MapSize is the number of cells of the map on a screen of cols x rows.
-func MapSize(cols, rows int) int {
-	l := retro.NewLayout(cols, rows)
-	return max(cols-2, 1) * max(l.BodyH, 1)
-}
+func MapSize(cols, rows int) int { return blockview.MapSize(cols, rows) }
 
 // frame is what one screen of the view shows.
 type frame struct {
@@ -205,29 +200,10 @@ func (v *View) frame() frame {
 }
 
 func (v *View) Draw(screen tcell.Screen) {
-	cols, rows := screen.Size()
-	t := v.T
-	l := retro.NewLayout(cols, rows)
 	f := v.frame()
-	t.Background(screen)
-	t.TitleBar(screen, l.TitleBarY, cols, f.title, "q=Quit")
-
-	m := retro.NewBlockMap(t, 0)
-	m.Cells = f.cells
-	m.SetRect(1, l.BodyY, cols-2, l.BodyH)
-	m.Draw(screen)
-
-	st := retro.NewStatusBox(t)
-	st.Block, st.Percent, st.Elapsed, st.Mode = f.block, f.percent, v.Elapsed, f.mode
-	st.SetRect(1, l.LowerY, l.LeftW, retro.LowerHeight)
-	st.Draw(screen)
-
-	lg := retro.NewLegendBox(t, Legend, f.footer)
-	lg.SetRect(l.RightX, l.LowerY, l.RightW(), retro.LowerHeight)
-	lg.Draw(screen)
-
-	t.BottomBar(screen, l.BottomBarY, cols, f.msg, t.BarMsg, "restic-pve demo")
-	screen.HideCursor()
+	blockview.Screen{Title: f.title, Key: "q=Quit", Cells: f.cells, Block: f.block, Percent: f.percent,
+		Elapsed: v.Elapsed, Mode: f.mode, Legend: Legend, Footer: f.footer, Msg: f.msg,
+		Brand: "restic-pve demo"}.Draw(screen, v.T)
 }
 
 // stepper is a simulated run.

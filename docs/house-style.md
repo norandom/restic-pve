@@ -113,6 +113,7 @@ not UTF-8 (`LC_ALL`, `LC_CTYPE`, `LANG`; `C` and `POSIX` are ASCII).
 | Empty block, empty part of a progress track | `░` | `.` |
 | Done part of a progress track; done block without colour | `█` | `#` |
 | Passed empty block without colour | `▒` | `:` |
+| Block not read yet (live view) | `·` | blank |
 | Pointer in front of the focused row | `►` | `>` |
 | Middle dot between keys, ellipsis | `·` `…` | `-` `...` |
 
@@ -180,6 +181,7 @@ Reading...                                                          │ restic-p
   | Writing | new data from it goes into the backup now | white `W` |
   | In backup | read; its data is in the backup | yellow `◘` |
   | Passed, empty | the marker went past it, nothing to keep | yellow `░` |
+  | Not read yet | the live view knows nothing about it yet | white `·` |
 
   Bad (`B`) and unmovable (`X`) have no meaning in a backup and are not used.
 - **Movement**: there are two ways to show the progress of a backup on the map. Both grow a
@@ -212,6 +214,75 @@ Reading...                                                          │ restic-p
 - **Bottom bar**: the status word in red ("Reading...", "Writing...", "Finished."), and
   `│ restic-pve` on the right.
 
+### The live view of a real backup
+
+The packed view is also the live view of a real guest backup on the backup machine
+(`./status.sh --watch` there, which runs `vmastream watch`). It is drawn by the same code as the
+demo (package `blockview`), but every change on the screen comes from a real event of the
+backup. Nothing is animated: when the backup waits, the picture waits.
+
+| On screen | What really happens |
+|---|---|
+| `r` on a block | clusters of that part of the disk are arriving from the Proxmox host now and the part is not complete yet |
+| `W` at the end of the run | bytes went into the backup stream (the pipe restic reads) since the last update, or a write is in progress |
+| a block joins the yellow run | every cluster of that part arrived and all its data has been written into the backup stream |
+| a white block | that part holds data that is not in the backup stream yet (read ahead and waiting in the reorder buffer, or in the frame being filled) |
+| a shaded block | every cluster of that part arrived and none held data; or its data moved into the run |
+| `·` | not read yet in this run, and no earlier backup says it holds data |
+| speed on the bottom bar | disk bytes passed per second over the last five seconds, from the state file |
+
+What is representation and not a fact: only the exact cell a block lands in inside the yellow
+run. The backup stores the data of the blocks in disk order, without the empty parts' data, so
+the run is "as many blocks as hold data", packed from the top-left. The empty parts are not read
+as data: the Proxmox host sends no bytes for them; the stream to restic carries them as zeros,
+which restic stores once.
+
+The last known layout: when the guest's last good backup left its map, the blocks it found with
+data are drawn white from the start, before they are read in this run; the read corrects them as
+it passes.
+
+Status box: "Block N" is the length of the yellow run, the percentage is the share of the disk
+passed, then the elapsed time and "Full backup"; at the end "Done in hh:mm:ss" (all data is in
+the backup stream; restic then completes its snapshot) or "Failed after hh:mm:ss" with the reason
+on the bottom bar. Legend footer: "Guest <id>:  1 block = <size>". The bottom bar says that `q`
+leaves the view and the backup goes on. When no backup runs, the screen says so in a sentence and
+names the command that starts one.
+
+#### The state file (format version 1)
+
+`vmastream backup --view-dir DIR` writes `DIR/live` at most twice a second (write to a temporary
+file, then rename) and, after a complete stream, a copy as `DIR/vm-<vmid>.last`. Plain text, one
+`key value` line per field, about 4.5 KB:
+
+```
+vmastream-view 1
+guest 100                 guest id
+name example              guest alias (may be empty)
+mode full                 kind of backup
+status running            running | done | failed
+started 1763380000123     Unix milliseconds
+updated 1763380012456     Unix milliseconds of this snapshot
+disk 34359738368          bytes of all disks of the guest, laid out one after the other
+read 1234567              bytes of the disks passed (clusters arrived, empty ones included)
+data 1234567              bytes of clusters that held data
+handed 1234567            bytes of data written into the backup stream
+written 1234567           bytes written to the backup stream (framing and zero runs included)
+writing 1                 a write to the stream is running or happened since the last snapshot
+reading 17 18             cells with clusters arriving now
+message text              why the stream failed, one line, or empty
+map ??..oo##...           one character per cell, at most 4096 cells
+```
+
+Map characters: `?` not read yet (or partly read, no data so far), `.` empty (every cluster
+arrived, none held data), `o` holds data not all in the stream yet (or not complete), `#` complete
+and all its data in the stream. Cell `c` covers the clusters from `ceil(c*N/cells)` to the next
+cell's first, `N` the clusters of all disks. A reader rejects a file whose first line is not
+`vmastream-view 1`.
+
+The writer never affects the backup: the stream only counts into its own arrays and stores a
+snapshot pointer; a separate goroutine writes the file; on the first write error it logs one
+line and stays off for the run; `VMASTREAM_VIEW=off` turns it off. The viewer only reads.
+
 ## 3. Where we differ from the reference, and why
 
 - **Our words.** Our menu bar names the program and the step, not a menu; our legend says
@@ -229,9 +300,16 @@ Reading...                                                          │ restic-p
 
 ## 4. In this repository
 
-`internal/retro` holds the style: palette and characters (`Theme`), bars, framed boxes, the
-progress track, the block map, the Status and Legend boxes. It draws on `tcell` screens and
-builds on `tview` primitives and has no install code, so other programs of the project can import
-or copy it. `restic-pve demo [pack] [full|incremental]` shows the block map with a simulated run of a
-125 GiB disk: without `pack` in place, with `pack` packed. It reads no data and is not in the
-usage line.
+`retro` (`github.com/norandom/restic-pve/retro`) holds the style: palette and characters
+(`Theme`), bars, framed boxes, the progress track, the block map, the Status and Legend boxes. It
+draws on `tcell` screens and builds on `tview` primitives and has no install code.
+
+`blockview` (`github.com/norandom/restic-pve/blockview`) is the packed block view: the model
+(`Input`: one `Cell` per block, not read yet / empty / data / in the backup, plus the blocks being
+read, the `W` cells and the last known layout; `Pack` turns it into the map, `Group` fits a large
+map to the screen) and the full screen (`Screen`, and `Notice` for a screen that only says
+something). The demo and the live view on the backup machine both draw through it.
+
+`restic-pve demo [pack] [full|incremental]` shows the block map with a simulated run of a
+125 GiB disk: without `pack` in place, with `pack` packed (through `blockview`). It reads no data
+and is not in the usage line.

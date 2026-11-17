@@ -18,6 +18,7 @@ const (
 	Writing                // its new data goes into the backup now ("W")
 	Done                   // read and in the backup (yellow block)
 	DoneEmpty              // empty and passed (yellow shade)
+	Unread                 // not read yet and nothing known about it (a quiet dot)
 )
 
 // Cell returns the character and style of a block in state s.
@@ -34,6 +35,8 @@ func (t Theme) Cell(s State) (rune, tcell.Style) {
 			return t.G.Full, t.CellDone
 		}
 		return t.G.Block, t.CellDone
+	case Unread:
+		return t.G.Unread, t.CellEmpty
 	case DoneEmpty:
 		if !t.Color {
 			return t.G.DoneShade, t.CellDone

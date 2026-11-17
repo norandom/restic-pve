@@ -181,7 +181,7 @@ Go runs in the pinned image only:
 ```
 docker run --rm -u "$(id -u):$(id -g)" -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOLCHAIN=local \
   -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -v "$PWD:/src:ro" -w /src golang:1.27.1-alpine3.24 \
-  sh -c 'gofmt -l cmd internal ; go vet ./... && go test ./...'
+  sh -c 'gofmt -l cmd internal retro blockview ; go vet ./... && go test ./...'
 ```
 
 The libraries are vendored (`vendor/`, pinned in `go.mod` and `go.sum`); `GOPROXY=off` proves

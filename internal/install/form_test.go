@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/norandom/restic-pve/internal/retro"
+	"github.com/norandom/restic-pve/retro"
 )
 
 // shot is one screen the form showed: its text, one line per row, and its cells.

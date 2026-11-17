@@ -61,7 +61,7 @@ jobs:
             -v "$PWD:/src:ro" -v "$RUNNER_TEMP/dist:/dist" -w /src \
             "$GO_IMAGE" sh -eu -s <<'EOF'
           go version
-          unformatted="$(gofmt -l cmd internal)"
+          unformatted="$(gofmt -l cmd internal retro blockview)"
           if [ -n "$unformatted" ]; then
             echo "::error title=gofmt::files need gofmt: $unformatted"
             exit 1

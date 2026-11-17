@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/norandom/restic-pve/internal/retro"
+	"github.com/norandom/restic-pve/retro"
 	"github.com/rivo/tview"
 )
 

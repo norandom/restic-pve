@@ -33,14 +33,15 @@ type Glyphs struct {
 	Block                rune // block with data
 	Full                 rune // filled progress track; a done block without colour
 	DoneShade            rune // a done empty block without colour
+	Unread               rune // a block not read yet, nothing known about it
 	Current, Done        rune // list marks for the current and the finished steps
 }
 
 var (
 	unicodeGlyphs = Glyphs{H: '─', V: '│', TL: '┌', TR: '┐', BL: '└', BR: '┘', Sep: '│',
-		Shade: '░', Block: '◘', Full: '█', DoneShade: '▒', Current: '►', Done: '√'}
+		Shade: '░', Block: '◘', Full: '█', DoneShade: '▒', Unread: '·', Current: '►', Done: '√'}
 	asciiGlyphs = Glyphs{H: '-', V: '|', TL: '+', TR: '+', BL: '+', BR: '+', Sep: '|',
-		Shade: '.', Block: 'o', Full: '#', DoneShade: ':', Current: '>', Done: '*'}
+		Shade: '.', Block: 'o', Full: '#', DoneShade: ':', Unread: ' ', Current: '>', Done: '*'}
 )
 
 // Theme holds the styles and glyphs of one screen.

@@ -4,7 +4,8 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/norandom/restic-pve/internal/retro"
+	"github.com/norandom/restic-pve/blockview"
+	"github.com/norandom/restic-pve/retro"
 )
 
 // The packed view shows a backup the way the reference defragmenter moves blocks: the backup
@@ -49,9 +50,13 @@ const (
 )
 
 // PackSim is a simulated packed run over a disk of blocks. Step moves it on by one tick.
+//
+// The run keeps what a real backup knows about each block (blockview.Cell) and draws it with
+// the same model as the live view of a real backup (blockview.Pack); Cells is that picture.
 type PackSim struct {
 	Mode     Mode
-	Cells    []retro.State
+	Cells    []retro.State    // the map as drawn, from blockview.Pack after every step
+	disk     []blockview.Cell // what the run knows about each block
 	BlockMiB int
 	Data     int    // blocks with data: the length of the run at the end
 	changed  []bool // the block changed since the last backup (incremental)
@@ -96,14 +101,29 @@ func NewPackSim(mode Mode, cells int, seed uint64) *PackSim {
 	blockMiB := (total + cells - 1) / cells
 	n := (total + blockMiB - 1) / blockMiB
 	data, changed := packLayout(n, seed)
-	s := &PackSim{Mode: mode, Cells: make([]retro.State, n), BlockMiB: blockMiB, changed: changed}
+	s := &PackSim{Mode: mode, disk: make([]blockview.Cell, n), BlockMiB: blockMiB, changed: changed}
 	for i, d := range data {
+		s.disk[i] = blockview.Empty
 		if d {
-			s.Cells[i] = retro.Data
+			s.disk[i] = blockview.Data
 			s.Data++
 		}
 	}
+	s.draw()
 	return s
+}
+
+// draw computes Cells from the state of the run: the blocks being read show "r", the cells
+// being written at the end of the run show "W".
+func (s *PackSim) draw() {
+	in := blockview.Input{Cells: s.disk}
+	if s.phase != packIdle {
+		in.Reading = s.src
+	}
+	if s.phase == packWriting {
+		in.Writing = len(s.src)
+	}
+	s.Cells, _ = blockview.Pack(in)
 }
 
 // Packed is the number of blocks in the run.
@@ -126,8 +146,8 @@ func (s *PackSim) Writing() bool { return s.phase == packWriting }
 // next is the first block with data after the run that is not in the current batch; -1 when
 // there is none.
 func (s *PackSim) next() int {
-	for s.scan = max(s.scan, s.run); s.scan < len(s.Cells); s.scan++ {
-		if s.Cells[s.scan] == retro.Data {
+	for s.scan = max(s.scan, s.run); s.scan < len(s.disk); s.scan++ {
+		if s.disk[s.scan] == blockview.Data {
 			return s.scan
 		}
 	}
@@ -136,8 +156,7 @@ func (s *PackSim) next() int {
 
 // join puts block j at the end of the run without "r" and "W".
 func (s *PackSim) join(j int) {
-	s.Cells[j] = retro.Empty
-	s.Cells[s.run] = retro.Done
+	s.disk[j] = blockview.Handed
 	s.run++
 }
 
@@ -169,6 +188,7 @@ func (s *PackSim) Step() {
 	if s.Finished() {
 		return
 	}
+	defer s.draw()
 	s.ticks++
 	if s.wait > 0 {
 		s.wait--
@@ -176,18 +196,12 @@ func (s *PackSim) Step() {
 	}
 	switch s.phase {
 	case packReading:
-		for k := range s.src {
-			s.Cells[s.run+k] = retro.Writing
-		}
 		s.phase = packWriting
 		s.wait = s.pace.w - 1
 		return
 	case packWriting:
 		for _, j := range s.src {
-			s.Cells[j] = retro.Empty
-		}
-		for range s.src {
-			s.Cells[s.run] = retro.Done
+			s.disk[j] = blockview.Handed
 			s.run++
 		}
 		s.moved += len(s.src)
@@ -224,8 +238,8 @@ func (s *PackSim) startBatch() {
 		if j < 0 || s.Mode == Incremental && len(s.src) > 0 {
 			break
 		}
-		s.Cells[j] = retro.Reading
 		s.src = append(s.src, j)
+		s.scan = j + 1
 	}
 	s.phase = packReading
 	s.wait = l.r - 1
