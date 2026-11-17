@@ -148,11 +148,13 @@ func (s *Sim) Step() {
 	}
 }
 
-// View is the block map screen of a simulated run.
+// View is the block map screen of a simulated run: the in-place view (Sim) or, when Pack is
+// set, the packed view.
 type View struct {
 	*tview.Box
 	T       retro.Theme
 	Sim     *Sim
+	Pack    *PackSim
 	Elapsed time.Duration
 }
 
@@ -169,36 +171,69 @@ func MapSize(cols, rows int) int {
 	return max(cols-2, 1) * max(l.BodyH, 1)
 }
 
+// frame is what one screen of the view shows.
+type frame struct {
+	title, mode, footer, msg string
+	cells                    []retro.State
+	block, percent           int
+}
+
+func (v *View) frame() frame {
+	if p := v.Pack; p != nil {
+		f := frame{title: fmt.Sprintf("Demo · packed %s · %d GiB disk · reads no data", lower(p.Mode), DiskGiB),
+			mode: p.Mode.String() + " · packed view", footer: fmt.Sprintf("Data: %d blocks x %d MiB", p.Data, p.BlockMiB),
+			msg: "Reading...", cells: p.Cells, block: p.Packed(), percent: p.Percent()}
+		switch {
+		case p.Finished():
+			f.mode, f.msg = "Done in "+retro.Elapsed(v.Elapsed), "Finished. Press q to quit."
+		case p.Writing():
+			f.msg = "Writing..."
+		}
+		return f
+	}
+	s := v.Sim
+	f := frame{title: fmt.Sprintf("Demo · simulated %s · %d GiB disk · reads no data", lower(s.Mode), DiskGiB),
+		mode: s.Mode.String(), footer: fmt.Sprintf("Demo disk:   1 block = %d MiB", s.BlockMiB),
+		msg: "Reading...", cells: s.Cells, block: min(s.Pos()+1, len(s.Cells)), percent: s.Percent()}
+	switch {
+	case s.Finished():
+		f.msg = "Finished. Press q to quit."
+	case s.Cells[s.Pos()] == retro.Writing:
+		f.msg = "Writing..."
+	}
+	return f
+}
+
 func (v *View) Draw(screen tcell.Screen) {
 	cols, rows := screen.Size()
 	t := v.T
 	l := retro.NewLayout(cols, rows)
+	f := v.frame()
 	t.Background(screen)
-	t.TitleBar(screen, l.TitleBarY, cols, fmt.Sprintf("Demo · simulated %s · %d GiB disk · reads no data", lower(v.Sim.Mode), DiskGiB), "q=Quit")
+	t.TitleBar(screen, l.TitleBarY, cols, f.title, "q=Quit")
 
 	m := retro.NewBlockMap(t, 0)
-	m.Cells = v.Sim.Cells
+	m.Cells = f.cells
 	m.SetRect(1, l.BodyY, cols-2, l.BodyH)
 	m.Draw(screen)
 
 	st := retro.NewStatusBox(t)
-	st.Block, st.Percent, st.Elapsed, st.Mode = min(v.Sim.Pos()+1, len(v.Sim.Cells)), v.Sim.Percent(), v.Elapsed, v.Sim.Mode.String()
+	st.Block, st.Percent, st.Elapsed, st.Mode = f.block, f.percent, v.Elapsed, f.mode
 	st.SetRect(1, l.LowerY, l.LeftW, retro.LowerHeight)
 	st.Draw(screen)
 
-	lg := retro.NewLegendBox(t, Legend, fmt.Sprintf("Demo disk:   1 block = %d MiB", v.Sim.BlockMiB))
+	lg := retro.NewLegendBox(t, Legend, f.footer)
 	lg.SetRect(l.RightX, l.LowerY, l.RightW(), retro.LowerHeight)
 	lg.Draw(screen)
 
-	msg := "Reading..."
-	switch {
-	case v.Sim.Finished():
-		msg = "Finished. Press q to quit."
-	case v.Sim.Cells[v.Sim.Pos()] == retro.Writing:
-		msg = "Writing..."
-	}
-	t.BottomBar(screen, l.BottomBarY, cols, msg, t.BarMsg, "restic-pve demo")
+	t.BottomBar(screen, l.BottomBarY, cols, f.msg, t.BarMsg, "restic-pve demo")
 	screen.HideCursor()
+}
+
+// stepper is a simulated run.
+type stepper interface {
+	Step()
+	Finished() bool
 }
 
 func lower(m Mode) string {
@@ -208,12 +243,21 @@ func lower(m Mode) string {
 	return "full backup"
 }
 
-// Run shows the simulated run on an initialised screen until q or Ctrl-C.
-func Run(screen tcell.Screen, mode Mode, color bool) error {
+// Run shows the simulated run on an initialised screen until q or Ctrl-C; pack picks the
+// packed view.
+func Run(screen tcell.Screen, mode Mode, pack, color bool) error {
 	t := retro.NewTheme(screen, color)
 	t.Apply()
 	cols, rows := screen.Size()
-	v := &View{Box: tview.NewBox(), T: t, Sim: NewSim(mode, MapSize(cols, rows))}
+	v := &View{Box: tview.NewBox(), T: t}
+	var sim stepper
+	if pack {
+		v.Pack = NewPackSim(mode, MapSize(cols, rows), PackSeed)
+		sim = v.Pack
+	} else {
+		v.Sim = NewSim(mode, MapSize(cols, rows))
+		sim = v.Sim
+	}
 	app := tview.NewApplication().SetScreen(retro.Ready(screen)).SetRoot(v, true)
 	app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyCtrlC || ev.Key() == tcell.KeyRune && (ev.Rune() == 'q' || ev.Rune() == 'Q') {
@@ -232,8 +276,8 @@ func Run(screen tcell.Screen, mode Mode, color bool) error {
 				return
 			case <-tick.C:
 				app.QueueUpdateDraw(func() {
-					if !v.Sim.Finished() {
-						v.Sim.Step()
+					if !sim.Finished() {
+						sim.Step()
 						v.Elapsed = time.Since(start)
 					}
 				})
@@ -245,11 +289,26 @@ func Run(screen tcell.Screen, mode Mode, color bool) error {
 	return err
 }
 
-// Main is "restic-pve demo [full|incremental]": it needs a terminal.
+// Args reports whether args are those of "restic-pve demo [pack] [full|incremental]" and
+// which run they ask for.
+func Args(args []string) (mode Mode, pack, ok bool) {
+	if len(args) > 0 && args[0] == "pack" {
+		pack, args = true, args[1:]
+	}
+	switch {
+	case len(args) == 0 || len(args) == 1 && args[0] == "full":
+		return Full, pack, true
+	case len(args) == 1 && args[0] == "incremental":
+		return Incremental, pack, true
+	}
+	return Full, false, false
+}
+
+// Main is "restic-pve demo [pack] [full|incremental]": it needs a terminal.
 func Main(args []string, getenv func(string) string) error {
-	mode := Full
-	if len(args) == 1 && args[0] == "incremental" {
-		mode = Incremental
+	mode, pack, ok := Args(args)
+	if !ok {
+		return errors.New("usage: restic-pve demo [pack] [full|incremental]")
 	}
 	if !term.IsTerminal(0) || !term.IsTerminal(1) {
 		return errors.New("the demo needs a terminal")
@@ -262,5 +321,5 @@ func Main(args []string, getenv func(string) string) error {
 		return err
 	}
 	defer screen.Fini()
-	return Run(screen, mode, getenv("NO_COLOR") == "")
+	return Run(screen, mode, pack, getenv("NO_COLOR") == "")
 }

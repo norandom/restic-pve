@@ -182,15 +182,33 @@ Reading...                                                          │ restic-p
   | Passed, empty | the marker went past it, nothing to keep | yellow `░` |
 
   Bad (`B`) and unmovable (`X`) have no meaning in a backup and are not used.
-- **Movement**: the marker (`r`, then `W` while new data is written) moves one block at a time,
-  left to right, then on to the next row. Every block behind it turns yellow, so the yellow run
-  grows from the top-left like a progress bar. A full backup moves at an even pace and shows `W`
-  on every block with data. An incremental backup races over unchanged blocks (they turn yellow
-  without `W`) and stays on changed blocks, `r` and then `W`. The view only shows what the backup
-  really did; it never changes how the backup works.
+- **Movement**: there are two ways to show the progress of a backup on the map. Both grow a
+  yellow run from the top-left, left to right, line by line. The view only shows what the
+  backup really did; it never changes how the backup works.
+  - **In place.** The marker (`r`, then `W` while new data is written) moves one block at a
+    time, left to right, then on to the next row. Every block behind it turns yellow where it
+    is (blocks with data as yellow `◘`, empty ones as yellow `░`), so the run reads like a
+    progress bar. A full backup moves at an even pace and shows `W` on every block with data.
+    An incremental backup races over unchanged blocks (they turn yellow without `W`) and stays
+    on changed blocks, `r` and then `W`.
+  - **Packed.** Closest to the movement of the reference: the backup keeps only the blocks that
+    hold data and stores them packed, so the blocks move. The next scattered block with data
+    ahead of the run shows `r`; then the cell at the end of the run shows `W`; then that cell
+    turns yellow and the block's old place becomes empty, and the next block is read in the
+    same step. A block that already sits at the end of the run turns yellow in place. The
+    yellow run has no holes, and the map after it thins out to empty as blocks are taken. At
+    the end one solid yellow run stands at the top, as long as the number of blocks with data,
+    and the rest of the map is empty. A full backup starts slowly, one block at a time, and
+    speeds up gradually (shorter `r` and `W`, then several blocks read and written together).
+    An incremental backup lets unchanged blocks join the run quickly without `r` and `W`; only
+    changed blocks are read and written.
 - **Status box**: "Block N" and the percentage; the progress track; "Elapsed Time: hh:mm:ss"; the
-  kind of run ("Full backup", "Incremental backup").
-- **Legend box**: the states in two columns as above, then "Guest <id>:   1 block = N MiB".
+  kind of run ("Full backup", "Incremental backup"). In the packed view "Block N" counts the
+  blocks in the run, the percentage is the share of blocks with data in it, the kind of run
+  ends in "· packed view", and at the end the last line reads "Done in hh:mm:ss" until the
+  screen is closed.
+- **Legend box**: the states in two columns as above, then "Guest <id>:   1 block = N MiB"; in
+  the packed view "Data: N blocks x M MiB".
 - **Bottom bar**: the status word in red ("Reading...", "Writing...", "Finished."), and
   `│ restic-pve` on the right.
 
@@ -199,9 +217,10 @@ Reading...                                                          │ restic-p
 - **Our words.** Our menu bar names the program and the step, not a menu; our legend says
   "Has data", "Empty", "In backup"; the bottom bar names our program. No product names.
 - **No `B` and `X`.** They have no meaning in a backup.
-- **Passed empty blocks turn yellow (shaded).** In the reference, data is moved to the front,
-  so the yellow run is solid. In a backup the empty blocks stay where they are; colouring them
-  yellow keeps the run continuous, so it still reads as one progress bar.
+- **Passed empty blocks turn yellow (shaded), in the in-place view.** In the reference, data is
+  moved to the front, so the yellow run is solid. In the in-place view the empty blocks stay
+  where they are; colouring them yellow keeps the run continuous, so it still reads as one
+  progress bar. The packed view moves the blocks like the reference and needs no yellow shade.
 - **No gaps between cells.** Terminals draw shade and block characters to the cell edges.
 - **The forms** have no counterpart in the reference. They borrow its parts: grey bars, the
   blue screen, yellow box titles, the two lower boxes (Progress like Status, Help like Legend).
@@ -213,5 +232,6 @@ Reading...                                                          │ restic-p
 `internal/retro` holds the style: palette and characters (`Theme`), bars, framed boxes, the
 progress track, the block map, the Status and Legend boxes. It draws on `tcell` screens and
 builds on `tview` primitives and has no install code, so other programs of the project can import
-or copy it. `restic-pve demo` (and `restic-pve demo incremental`) shows the block map with a
-simulated run of a 125 GiB disk; it reads no data and is not in the usage line.
+or copy it. `restic-pve demo [pack] [full|incremental]` shows the block map with a simulated run of a
+125 GiB disk: without `pack` in place, with `pack` packed. It reads no data and is not in the
+usage line.

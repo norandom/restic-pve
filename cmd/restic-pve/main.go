@@ -6,8 +6,10 @@
 //	restic-pve uninstall                                root: remove the identity, its files and the binary
 //	restic-pve version                                  print the version
 //
-// Not in the usage line: restic-pve demo [full|incremental] shows the block map of the backup
-// view with a simulated run, to judge the retro look; it reads no data.
+// Not in the usage line: restic-pve demo [pack] [full|incremental] shows the block map of the
+// backup view with a simulated run, to judge the retro look; it reads no data. Without "pack"
+// blocks turn yellow in place; with "pack" they are moved into one solid run at the top, like
+// the reference defragmenter.
 package main
 
 import (
@@ -56,7 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		sys := install.Default(version, exe)
 		sys.Plain = len(args) == 2
 		return sys.Install()
-	case args[0] == "demo" && (len(args) == 1 || len(args) == 2 && (args[1] == "full" || args[1] == "incremental")):
+	case args[0] == "demo" && demoArgs(args[1:]):
 		if err := demo.Main(args[1:], os.Getenv); err != nil {
 			fmt.Fprintf(stderr, "restic-pve demo: %v\n", err)
 			return 1
@@ -81,6 +83,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 // executable returns the path of the running binary with symlinks resolved.
+func demoArgs(args []string) bool {
+	_, _, ok := demo.Args(args)
+	return ok
+}
+
 func executable() (string, error) {
 	exe, err := os.Executable()
 	if err == nil {
