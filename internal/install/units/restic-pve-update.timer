@@ -1,0 +1,11 @@
+# written by restic-pve install - do not edit, run restic-pve install again
+[Unit]
+Description=Daily update of restic-pve to the latest signed release
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

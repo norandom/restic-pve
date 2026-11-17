@@ -1,0 +1,9 @@
+# written by restic-pve install - do not edit, run restic-pve install again
+[Unit]
+Description=Update restic-pve to the latest signed release
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/restic-pve update

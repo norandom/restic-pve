@@ -1,0 +1,147 @@
+# restic-pve release.
+#
+# A pushed tag vX.Y.Z builds restic-pve for linux/amd64 and writes VERSION and SHA256SUMS. The
+# publish job then waits for the required reviewer of the environment `release`. After the
+# approval it signs SHA256SUMS and publishes a release with four assets: restic-pve-linux-amd64,
+# VERSION, SHA256SUMS and SHA256SUMS.sig. A manual dispatch is a dry run: build and artifacts
+# only, nothing is signed or published. See docs/release-signing.md.
+#
+# The build job sees no secret. Only the signing step of the publish job sees
+# RELEASE_SIGNING_KEY. The job refuses to sign when the public half of that key is not compiled
+# into this release (relsign embedded), so a published binary can always verify the next update.
+#
+# Toolchain: a Go image pinned by tag and digest, CGO_ENABLED=0, GOPROXY=off (stdlib only,
+# nothing downloaded), GOTOOLCHAIN=local. GitHub-hosted runners only. Actions are pinned by
+# commit SHA; the release is created with the preinstalled gh CLI and the built-in token.
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'norandom/restic-pve'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GO_IMAGE: golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
+      EVENT: ${{ github.event_name }}
+      REF_NAME: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pick the version
+        run: |
+          # a dispatch is a dry run and builds v0.0.0
+          if [ "$EVENT" = push ]; then tag=$REF_NAME; else tag=v0.0.0; fi
+          printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "::error::bad tag $tag"; exit 1; }
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Check, test and build in the pinned Go image
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          docker run --rm -i -u "$(id -u):$(id -g)" \
+            -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOLCHAIN=local \
+            -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e TAG -e REPO \
+            -v "$PWD:/src:ro" -v "$RUNNER_TEMP/dist:/dist" -w /src \
+            "$GO_IMAGE" sh -eu -s <<'EOF'
+          go version
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error title=gofmt::files need gofmt: $unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -buildid= -X main.version=$TAG -X main.releaseRepo=$REPO" \
+            -o /dist/restic-pve-linux-amd64 ./cmd/restic-pve
+          # relsign for this runner (publish job only, not a release asset)
+          go build -trimpath -ldflags="-s -w -buildid=" -o /dist/relsign ./cmd/relsign
+          EOF
+
+      - name: Write VERSION and SHA256SUMS
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          printf '%s\n' "$TAG" > VERSION
+          sha256sum restic-pve-linux-amd64 VERSION > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: restic-pve-release
+          path: |
+            ${{ runner.temp }}/dist/restic-pve-linux-amd64
+            ${{ runner.temp }}/dist/VERSION
+            ${{ runner.temp }}/dist/SHA256SUMS
+            ${{ runner.temp }}/dist/relsign
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    # tag pushes only; a manual dispatch is a dry run (artifacts only)
+    if: github.repository == 'norandom/restic-pve' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # waits for the required reviewer
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: restic-pve-release
+          path: dist
+
+      - name: Check checksums and version
+        working-directory: dist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum -c SHA256SUMS
+          [ "$(cat VERSION)" = "$TAG" ] || { echo "::error::VERSION does not match tag $TAG"; exit 1; }
+          chmod 0755 relsign
+
+      - name: Sign SHA256SUMS
+        working-directory: dist
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          pub="$(./relsign pubkey)"
+          echo "signing key: $pub"
+          if ! ./relsign embedded "$pub"; then
+            echo "::error title=relsign::the signing key is not in internal/relkeys/keys.go of this tag"
+            exit 1
+          fi
+          ./relsign sign SHA256SUMS
+
+      - name: Verify the signature
+        working-directory: dist
+        run: ./relsign verify SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" dist/restic-pve-linux-amd64 dist/VERSION dist/SHA256SUMS dist/SHA256SUMS.sig \
+            --repo "$REPO" --verify-tag --title "restic-pve $TAG" \
+            --notes "Install on the Proxmox VE host (root shell): curl -fsSLo /usr/local/sbin/restic-pve https://github.com/$REPO/releases/latest/download/restic-pve-linux-amd64 && chmod 755 /usr/local/sbin/restic-pve && restic-pve install. The host then updates itself daily; by hand: restic-pve update."
