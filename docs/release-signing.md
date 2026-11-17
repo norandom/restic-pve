@@ -13,7 +13,8 @@ is built into the installed binary. The private key exists in two places: the Gi
 ## How a release is made
 
 1. Push a tag: `git tag v1.2.3 && git push origin v1.2.3`.
-2. Job `build` (no secret): gofmt, `go vet`, `go test`, builds the binary in the pinned Go image,
+2. Job `build` (no secret): gofmt of `cmd` and `internal`, `go vet`, `go test`, builds the binary from
+   the vendored sources in the pinned Go image,
    writes `VERSION` and `SHA256SUMS`.
 3. Job `publish` waits for the approval of the required reviewer of the environment `release`.
 4. After the approval it checks `SHA256SUMS`, refuses to sign when the signing key is not built

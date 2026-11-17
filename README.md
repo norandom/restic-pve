@@ -4,7 +4,9 @@ First time on a Proxmox VE host? Read [docs/onboarding.md](docs/onboarding.md).
 
 `restic-pve` is one static Go binary for a Proxmox VE host. It lets a backup machine pull a
 consistent image of a guest over SSH (`vzdump --stdout`) without root SSH and without any other
-software on the hypervisor. Stdlib only, no dependencies.
+software on the hypervisor. One static binary: its few libraries (the terminal screens use
+`tcell` and `tview`) are compiled in and kept in this repository under `vendor/`, so the build
+downloads nothing and the host needs no shared libraries.
 
 On the host there is the binary, one locked user with one restricted key, one sudoers file, one
 settings file and a daily update timer. Everything the binary writes is compiled into it
@@ -22,11 +24,12 @@ In a root shell on the Proxmox VE host:
 curl -fsSLo /usr/local/sbin/restic-pve https://github.com/norandom/restic-pve/releases/latest/download/restic-pve-linux-amd64 && chmod 755 /usr/local/sbin/restic-pve && restic-pve install
 ```
 
-`install` opens a form in the terminal, one screen per value: the backup machine address, its public
-key, the guests (a checklist), the storage for fleecing images (a list), the limits and a summary
-with `[ Install ]`. Nothing changes before Install. Run `restic-pve install` again to change a
-value. Without a terminal, or with `restic-pve install --plain`, it asks the same questions line
-by line.
+`install` opens a full-screen form in the terminal (a retro disk-tool look, see
+[docs/house-style.md](docs/house-style.md)), one screen per value: the backup machine address, its
+public key, the guests (a checklist), the storage for fleecing images (a list), the limits and a
+summary with `[ Install ]`. Nothing changes before Install. Run `restic-pve install` again to
+change a value. Without a terminal, or with `restic-pve install --plain`, it asks the same
+questions line by line.
 
 The host then updates itself: `restic-pve-update.timer` runs `restic-pve update` daily, which
 accepts only a newer release whose checksums are signed with a key built into the installed
@@ -91,16 +94,20 @@ The values and their rules:
    limit in MiB/s (stored as `BWLIMIT_KIB`), `MAX_WORKERS` (1-16)
 
 **Form.** When stdin and stdout are a terminal, `TERM` is set and not `dumb`, the terminal is at
-least 60x20 and `--plain` is not given, install shows a full-screen form (raw mode, alternate
-screen, plain ANSI sequences; the terminal is restored on exit, Ctrl-C, SIGTERM, SIGHUP and
-panic). One screen per value: text fields for address and key (an empty field shows a grey
-example that is never taken as the value; with `NO_COLOR` the example is an `e.g.` line), a
-checklist of `qm list` (Up/Down or j/k, Space ticks), a single choice of the active storages
-with free GiB, the limits with "Keep these (recommended)" or "Change" (four number fields), and a
-summary with `[ Install ]  [ Back ]  [ Cancel ]`, focus on Install. Enter continues when the value
-is valid, else its rule shows and the screen stays; Esc or Shift-Tab goes one screen back with the
-values kept; Ctrl-C or Cancel is exit 1 and nothing changed. A pasted key with a trailing newline
-counts as Enter; bracketed paste is understood.
+least 60x20 and `--plain` is not given, install shows a full-screen form in the project's retro
+disk-tool look ([docs/house-style.md](docs/house-style.md)): a blue screen, a grey title bar with
+the step, a framed box with the explanation and the field or list, a Progress box and a Help box
+below it, and a grey key bar at the bottom. The terminal is restored on exit, Ctrl-C, SIGTERM,
+SIGHUP and panic. One screen per value: text fields for address and key (an empty field shows a
+grey example that is never taken as the value; the Help box shows the example too), a checklist
+of `qm list` (Up/Down or j/k, Space ticks), a single choice of the active storages with free GiB,
+the limits with "Keep these (recommended)" or "Change" (four number fields, the Help box shows
+the range of the field being edited), and a summary with `[ Install ]  [ Back ]  [ Cancel ]`,
+focus on Install. The focused row or button is yellow. Enter continues when the value is valid,
+else its rule shows in the Help box and the screen stays; Esc or Shift-Tab goes one screen back
+with the values kept; Ctrl-C or Cancel is exit 1 and nothing changed. A pasted key with a
+trailing newline counts as Enter; bracketed paste is understood. `NO_COLOR` keeps the layout
+without colours (focus in inverse video); a locale that is not UTF-8 gets ASCII frames.
 
 **Plain** (`--plain`, or no terminal). One answer per line from stdin, the questions on stdout,
 with an example for address and key. Enter takes the default in brackets; an invalid answer
@@ -174,8 +181,12 @@ Go runs in the pinned image only:
 ```
 docker run --rm -u "$(id -u):$(id -g)" -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOLCHAIN=local \
   -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -v "$PWD:/src:ro" -w /src golang:1.27.1-alpine3.24 \
-  sh -c 'gofmt -l . ; go vet ./... && go test ./...'
+  sh -c 'gofmt -l cmd internal ; go vet ./... && go test ./...'
 ```
+
+The libraries are vendored (`vendor/`, pinned in `go.mod` and `go.sum`); `GOPROXY=off` proves
+that nothing is fetched. To update a library, run `go get <module>@<version> && go mod tidy &&
+go mod vendor` once in the same image with the network, and review the `vendor/` diff.
 
 Release build (the release workflow does this):
 

@@ -10,8 +10,9 @@
 # RELEASE_SIGNING_KEY. The job refuses to sign when the public half of that key is not compiled
 # into this release (relsign embedded), so a published binary can always verify the next update.
 #
-# Toolchain: a Go image pinned by tag and digest, CGO_ENABLED=0, GOPROXY=off (stdlib only,
-# nothing downloaded), GOTOOLCHAIN=local. GitHub-hosted runners only. Actions are pinned by
+# Toolchain: a Go image pinned by tag and digest, CGO_ENABLED=0, GOPROXY=off (the libraries are
+# vendored in vendor/, nothing is downloaded), GOTOOLCHAIN=local. gofmt checks our own code only
+# (cmd, internal), not the vendored libraries. GitHub-hosted runners only. Actions are pinned by
 # commit SHA; the release is created with the preinstalled gh CLI and the built-in token.
 name: release
 
@@ -60,7 +61,7 @@ jobs:
             -v "$PWD:/src:ro" -v "$RUNNER_TEMP/dist:/dist" -w /src \
             "$GO_IMAGE" sh -eu -s <<'EOF'
           go version
-          unformatted="$(gofmt -l .)"
+          unformatted="$(gofmt -l cmd internal)"
           if [ -n "$unformatted" ]; then
             echo "::error title=gofmt::files need gofmt: $unformatted"
             exit 1

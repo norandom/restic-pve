@@ -1,18 +1,19 @@
 package install
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/norandom/restic-pve/internal/retro"
+	"github.com/rivo/tview"
 )
 
-// The examples shown in the form (grey, or as an "e.g." line with NO_COLOR) and in the plain
-// questions. An example is never taken as a value.
+// The examples shown in the form (grey in an empty field, and in the Help box) and in the
+// plain questions. An example is never taken as a value.
 const (
 	exampleFrom = "192.0.2.10"
 	exampleKey  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
@@ -21,13 +22,15 @@ const (
 // The smallest terminal the form is drawn on; a smaller one gets the plain questions.
 const minCols, minRows = 60, 20
 
-// Terminal is the terminal the form runs on: term_linux.go on a host, a fake in tests.
+// Terminal is the terminal the form runs on: terminal.go on a host, a fake in tests.
 type Terminal interface {
 	// Size returns the columns and rows.
 	Size() (cols, rows int, err error)
-	// Start switches to raw mode on the alternate screen. stop restores the terminal and may
-	// be called more than once.
-	Start() (stop func(), err error)
+	// Screen returns a new screen on the terminal, not yet initialised.
+	Screen() (tcell.Screen, error)
+	// Watch restores the terminal with fini when a signal ends the program; the returned
+	// stop ends the watch.
+	Watch(fini func()) (stop func())
 }
 
 // errNoForm means the terminal could not be set up; install asks line by line instead.
@@ -56,14 +59,18 @@ func (s *System) termSize() (int, int) {
 }
 
 // form shows the install form and returns the values to install. The terminal is restored
-// before it returns, also on a panic.
+// before it returns, also on a panic or a signal.
 func (s *System) form(def *Values, gs []guest, sts []storage) (*Values, error) {
-	stop, err := s.Term.Start()
+	screen, err := s.Term.Screen()
 	if err != nil {
 		return nil, errNoForm
 	}
-	defer stop()
-	return newForm(def, gs, sts, s.Stdin, s.Stdout, s.termSize, s.Getenv("NO_COLOR") == "").run()
+	if err := screen.Init(); err != nil {
+		return nil, errNoForm
+	}
+	defer screen.Fini()
+	defer s.Term.Watch(screen.Fini)()
+	return newForm(def, gs, sts).run(screen, s.Getenv("NO_COLOR") == "")
 }
 
 // keyKind is one key of the form.
@@ -82,7 +89,7 @@ const (
 	kBackspace
 	kCtrlC
 	kCtrlU
-	kEOF
+	kNone
 )
 
 type keyIn struct {
@@ -90,123 +97,52 @@ type keyIn struct {
 	r    rune
 }
 
-// keyReader turns the bytes of a raw terminal into keys. "\r", "\n" and "\r\n" are one
-// Enter. Inside a bracketed paste an Enter ends the paste: the rest of it is dropped.
-type keyReader struct {
-	r            io.Reader
-	buf          []byte
-	queue        []keyIn
-	paste, skip  bool
-	lastCR, done bool
-}
-
-func (k *keyReader) next() keyIn {
-	for len(k.queue) == 0 {
-		if k.done {
-			return keyIn{kind: kEOF}
+// keyOf turns a key event of the terminal into a key of the form.
+func keyOf(ev *tcell.EventKey) keyIn {
+	switch ev.Key() {
+	case tcell.KeyRune:
+		if unicode.IsPrint(ev.Rune()) {
+			return keyIn{kind: kRune, r: ev.Rune()}
 		}
-		chunk := make([]byte, 4096)
-		n, err := k.r.Read(chunk)
-		k.buf = append(k.buf, chunk[:n]...)
-		if err != nil {
-			k.done = true
+	case tcell.KeyEnter, tcell.KeyLF:
+		return keyIn{kind: kEnter}
+	case tcell.KeyEsc:
+		return keyIn{kind: kEsc}
+	case tcell.KeyBacktab:
+		return keyIn{kind: kBackTab}
+	case tcell.KeyTab:
+		return keyIn{kind: kTab}
+	case tcell.KeyUp:
+		return keyIn{kind: kUp}
+	case tcell.KeyDown:
+		return keyIn{kind: kDown}
+	case tcell.KeyLeft:
+		return keyIn{kind: kLeft}
+	case tcell.KeyRight:
+		return keyIn{kind: kRight}
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		return keyIn{kind: kBackspace}
+	case tcell.KeyCtrlC:
+		return keyIn{kind: kCtrlC}
+	case tcell.KeyCtrlU:
+		return keyIn{kind: kCtrlU}
+	}
+	return keyIn{kind: kNone}
+}
+
+// pasteKeys are the keys of a paste: its first line, and Enter when a line break ends it.
+// The rest after the first line break is dropped.
+func pasteKeys(text string) []keyIn {
+	var ks []keyIn
+	for _, r := range text {
+		if r == '\r' || r == '\n' {
+			return append(ks, keyIn{kind: kEnter})
 		}
-		k.parse()
-	}
-	kk := k.queue[0]
-	k.queue = k.queue[1:]
-	return kk
-}
-
-func (k *keyReader) emit(kk keyIn) {
-	if k.skip && kk.kind != kCtrlC {
-		return
-	}
-	k.queue = append(k.queue, kk)
-	if k.paste && kk.kind == kEnter {
-		k.skip = true
-	}
-}
-
-// parse moves the complete keys of buf to the queue; an incomplete escape sequence or
-// UTF-8 character at the end waits for the next read.
-func (k *keyReader) parse() {
-	b := k.buf
-	for len(b) > 0 {
-		c := b[0]
-		cr := false
-		switch {
-		case c == 0x1b && len(b) > 1 && (b[1] == '[' || b[1] == 'O'):
-			j := 2
-			for j < len(b) && (b[j] < 0x40 || b[j] > 0x7e) {
-				j++
-			}
-			if j == len(b) && !k.done {
-				k.buf = append([]byte(nil), b...)
-				return
-			}
-			if j == len(b) {
-				j--
-			}
-			k.sequence(string(b[1 : j+1]))
-			b = b[j+1:]
-			k.lastCR = false
-			continue
-		case c == 0x1b:
-			k.emit(keyIn{kind: kEsc})
-		case c == '\r':
-			k.emit(keyIn{kind: kEnter})
-			cr = true
-		case c == '\n':
-			if !k.lastCR {
-				k.emit(keyIn{kind: kEnter})
-			}
-		case c == 0x03:
-			k.emit(keyIn{kind: kCtrlC})
-		case c == 0x7f || c == 0x08:
-			k.emit(keyIn{kind: kBackspace})
-		case c == '\t':
-			k.emit(keyIn{kind: kTab})
-		case c == 0x15:
-			k.emit(keyIn{kind: kCtrlU})
-		case c < 0x20:
-		default:
-			if !utf8.FullRune(b) && !k.done {
-				k.buf = append([]byte(nil), b...)
-				return
-			}
-			r, n := utf8.DecodeRune(b)
-			if unicode.IsPrint(r) {
-				k.emit(keyIn{kind: kRune, r: r})
-			}
-			b = b[n:]
-			k.lastCR = false
-			continue
+		if unicode.IsPrint(r) {
+			ks = append(ks, keyIn{kind: kRune, r: r})
 		}
-		b = b[1:]
-		k.lastCR = cr
 	}
-	k.buf = nil
-}
-
-// sequence handles one escape sequence without its ESC.
-func (k *keyReader) sequence(seq string) {
-	switch seq {
-	case "[A", "OA":
-		k.emit(keyIn{kind: kUp})
-	case "[B", "OB":
-		k.emit(keyIn{kind: kDown})
-	case "[C", "OC":
-		k.emit(keyIn{kind: kRight})
-	case "[D", "OD":
-		k.emit(keyIn{kind: kLeft})
-	case "[Z":
-		k.emit(keyIn{kind: kBackTab})
-	case "[200~":
-		k.paste = true
-	case "[201~":
-		k.paste, k.skip = false, false
-	}
+	return ks
 }
 
 // The steps of the form; the summary is not counted in "step n of 5".
@@ -236,6 +172,14 @@ var stepTexts = []string{
 const summaryText = "Install writes these values, a backup user with its key, a sudoers file, " +
 	"the binary and a daily update timer. Nothing changes before you choose Install."
 
+// The short help in the Help box, per step.
+const (
+	helpFrom    = "Example: " + exampleFrom
+	helpKey     = "Example: ssh-ed25519 AAAA... and an optional comment, all on one line."
+	helpLimits  = "Keep: the values above stay. Change: edit them one by one."
+	helpSummary = "Install starts. Back returns to the limits. Cancel changes nothing."
+)
+
 // The four limit fields of "Change": label and one sentence with the allowed range.
 var limitFields = []struct{ label, help string }{
 	{"Free space to start (GiB)", "A backup starts only when the fleecing storage has this much free space. 1-999999."},
@@ -246,22 +190,21 @@ var limitFields = []struct{ label, help string }{
 
 var (
 	limitChoices = []string{"Keep these (recommended)", "Change"}
-	buttons      = []string{"[ Install ]", "[ Back ]", "[ Cancel ]"}
+	buttons      = []string{retro.Button("Install"), retro.Button("Back"), retro.Button("Cancel")}
 )
 
+// The keys on the bottom bar; Ctrl-C cancel is on the title bar.
 const (
-	footerText    = "Enter continue · Esc back · Ctrl-U clear · Ctrl-C cancel"
-	footerTicks   = "Up/Down move · Space tick · Enter continue · Esc back · Ctrl-C cancel"
-	footerChoice  = "Up/Down move · Enter choose · Esc back · Ctrl-C cancel"
-	footerFields  = "Up/Down field · Enter next · Esc back · Ctrl-U clear · Ctrl-C cancel"
-	footerSummary = "Left/Right move · Enter press · Esc back · Ctrl-C cancel"
+	footerText    = "Enter continue · Esc back · Ctrl-U clear"
+	footerTicks   = "Up/Down move · Space tick · Enter continue · Esc back"
+	footerChoice  = "Up/Down move · Enter choose · Esc back"
+	footerFields  = "Up/Down field · Enter next · Esc back · Ctrl-U clear"
+	footerSummary = "Left/Right move · Enter press · Esc back"
+	cancelKey     = "Ctrl-C=Cancel"
+	programName   = "restic-pve"
 )
 
 type form struct {
-	keys   *keyReader
-	out    io.Writer
-	size   func() (int, int)
-	color  bool
 	v      Values
 	gs     []guest
 	sts    []storage
@@ -281,10 +224,15 @@ type form struct {
 	field     int
 	button    int
 	msg       string
+
+	t      retro.Theme
+	done   bool  // Install was chosen
+	err    error // the form ended without values
+	stopFn func()
 }
 
-func newForm(def *Values, gs []guest, sts []storage, in io.Reader, out io.Writer, size func() (int, int), color bool) *form {
-	f := &form{keys: &keyReader{r: in}, out: out, size: size, color: color, v: *def, gs: gs, sts: sts,
+func newForm(def *Values, gs []guest, sts []storage) *form {
+	f := &form{v: *def, gs: gs, sts: sts, stopFn: func() {},
 		onHost: map[int]bool{}, active: map[string]bool{}, from: def.From, key: def.Pubkey}
 	for _, g := range gs {
 		n, _ := strconv.Atoi(g.vmid)
@@ -304,30 +252,70 @@ func newForm(def *Values, gs []guest, sts []storage, in io.Reader, out io.Writer
 	return f
 }
 
-func (f *form) run() (*Values, error) {
-	for {
-		if len(f.keys.queue) == 0 { // a paste is drawn once, not once per character
-			f.draw()
-		}
-		k := f.keys.next()
-		switch k.kind {
-		case kCtrlC:
-			return nil, errStop("cancelled")
-		case kEOF:
-			return nil, errStop("the terminal closed")
-		}
-		done, err := f.handle(k)
-		if err != nil {
-			return nil, err
-		}
-		if done {
-			v := f.v
-			return &v, nil
+// formView is the form as a tview primitive: it draws the whole screen and takes pastes.
+type formView struct {
+	*tview.Box
+	f *form
+}
+
+func (v *formView) Draw(screen tcell.Screen) { v.f.draw(screen) }
+
+func (v *formView) PasteHandler() func(string, func(tview.Primitive)) {
+	return func(text string, _ func(tview.Primitive)) {
+		for _, k := range pasteKeys(text) {
+			if v.f.press(k) {
+				return
+			}
 		}
 	}
 }
 
+// run shows the form on an initialised screen until Install, Cancel, Ctrl-C or the end of
+// the terminal.
+func (f *form) run(screen tcell.Screen, color bool) (*Values, error) {
+	f.t = retro.NewTheme(screen, color)
+	f.t.Apply()
+	app := tview.NewApplication().SetScreen(retro.Ready(screen)).EnablePaste(true)
+	f.stopFn = app.Stop
+	app.SetRoot(&formView{Box: tview.NewBox(), f: f}, true)
+	app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		f.press(keyOf(ev))
+		return nil
+	})
+	_ = app.Run() // an error is the terminal ending
+	switch {
+	case f.done:
+		v := f.v
+		return &v, nil
+	case f.err != nil:
+		return nil, f.err
+	}
+	return nil, errStop("the terminal closed")
+}
+
+// press handles one key and reports whether the form ended.
+func (f *form) press(k keyIn) bool {
+	if f.done || f.err != nil {
+		return true
+	}
+	if k.kind == kCtrlC {
+		f.err = errStop("cancelled")
+	} else if done, err := f.handle(k); err != nil {
+		f.err = err
+	} else {
+		f.done = done
+	}
+	if f.done || f.err != nil {
+		f.stopFn()
+		return true
+	}
+	return false
+}
+
 func (f *form) handle(k keyIn) (bool, error) {
+	if k.kind == kNone {
+		return false, nil
+	}
 	f.msg = ""
 	if k.kind == kEsc || k.kind == kBackTab {
 		f.back()
@@ -518,173 +506,190 @@ func (f *form) checkLimits() (at int, v [4]int, err error) {
 
 // ---- drawing ----
 
-// screen collects the lines of one frame and the place of the text cursor.
-type screen struct {
-	cols       int
-	lines      []string
-	curRow     int // 1-based; 0 hides the cursor
+// seg is a piece of a line in one style.
+type seg struct {
+	s  string
+	st tcell.Style
+}
+
+// body collects the lines of the main box and the place of the text cursor.
+type body struct {
+	t          retro.Theme
+	w          int // columns of a line
+	lines      [][]seg
+	fill       []bool // the line's last style runs to the end of the line
+	curRow     int    // line of the cursor; -1 hides it
 	curCol     int
-	bodyHeight int
+	bodyHeight int // lines left for the list or fields
 }
 
-func (f *form) sgr(code, s string) string {
-	if code == "" {
-		return s
-	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
+func (b *body) add(fill bool, segs ...seg) {
+	b.lines = append(b.lines, segs)
+	b.fill = append(b.fill, fill)
 }
 
-// colour is sgr for colours only, which NO_COLOR turns off.
-func (f *form) colour(code, s string) string {
-	if !f.color {
-		return s
-	}
-	return f.sgr(code, s)
-}
+func (b *body) text(s string) { b.add(false, seg{s, b.t.Base}) }
 
-// cut shortens s to at most w characters.
-func cut(s string, w int) string {
-	if r := []rune(s); len(r) > w {
-		if w < 1 {
-			return ""
-		}
-		return string(r[:w])
-	}
-	return s
-}
-
-// wrap breaks text into lines of at most w characters at spaces.
-func wrap(text string, w int) []string {
-	var lines []string
-	line := ""
-	for _, word := range strings.Fields(text) {
-		switch {
-		case line == "":
-			line = word
-		case utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= w:
-			line += " " + word
-		default:
-			lines = append(lines, line)
-			line = word
-		}
-	}
-	if line != "" {
-		lines = append(lines, line)
-	}
-	return lines
-}
-
-// add appends a line: the plain text plain (cut to the width) shown with styled.
-func (sc *screen) add(plain string, style func(string) string) {
-	t := cut(plain, sc.cols-1)
-	if style != nil {
-		t = style(t)
-	}
-	sc.lines = append(sc.lines, t)
-}
-
-func (sc *screen) text(s string) { sc.add(s, nil) }
-
-func (sc *screen) para(indent, text string) {
-	for _, l := range wrap(text, sc.cols-1-len(indent)) {
-		sc.text(indent + l)
+func (b *body) para(text string) {
+	for _, l := range retro.Wrap(text, b.w) {
+		b.text(l)
 	}
 }
 
-func (f *form) draw() {
-	cols, rows := f.size()
-	sc := &screen{cols: cols}
+// mark is the pointer in front of the focused row.
+func (f *form) mark(on bool) string {
+	if on {
+		return string(f.t.G.Current) + " "
+	}
+	return "  "
+}
+
+// row adds a list row: the focused one with the pointer and the yellow highlight.
+func (f *form) row(b *body, focused bool, text string) {
+	if focused {
+		b.add(true, seg{f.mark(true) + text, f.t.Focus})
+	} else {
+		b.text(f.mark(false) + text)
+	}
+}
+
+func (f *form) draw(screen tcell.Screen) {
+	cols, rows := screen.Size()
+	t := f.t
+	l := retro.NewLayout(cols, rows)
+	t.Background(screen)
+
 	title := "restic-pve install · "
+	boxTitle, help := "Summary", helpSummary
 	if f.step < stepSummary {
 		title += fmt.Sprintf("step %d of %d: %s", f.step+1, len(stepTitles), stepTitles[f.step])
+		boxTitle = stepTitles[f.step]
 	} else {
 		title += "summary"
 	}
-	sc.add(title, func(s string) string { return f.sgr("1", s) })
-	sc.text("")
+	t.TitleBar(screen, l.TitleBarY, cols, title, cancelKey)
+
+	// the main box: the explanation, then the field, the list or the summary
+	main := t.Box(boxTitle)
+	main.SetRect(1, l.BodyY, cols-2, l.BodyH)
+	main.Draw(screen)
+	bx, by, inner := 3, l.BodyY+1, l.BodyH-2
+	b := &body{t: t, w: cols - 6, curRow: -1}
+	if f.step < stepSummary {
+		b.para(stepTexts[f.step])
+		b.text("")
+	} else {
+		b.para(summaryText)
+	}
+	b.bodyHeight = inner - len(b.lines)
 	footer := footerChoice
 	switch f.step {
-	case stepFrom, stepKey:
-		footer = footerText
+	case stepFrom:
+		footer, help = footerText, helpFrom
+		f.drawField(b, f.from, exampleFrom)
+	case stepKey:
+		footer, help = footerText, helpKey
+		f.drawField(b, f.key, exampleKey)
 	case stepGuests:
-		footer = footerTicks
+		footer, help = footerTicks, fmt.Sprintf("%d ticked", len(f.ticked))
+		f.drawGuests(b)
+	case stepStorage:
+		st := f.sts[f.sCur]
+		help = fmt.Sprintf("%s: %s, %d GiB free", st.name, st.typ, st.freeGiB)
+		f.drawStorages(b)
 	case stepLimits:
+		help = helpLimits
 		if f.editing {
-			footer = footerFields
+			footer, help = footerFields, limitFields[f.field].help
 		}
+		f.drawLimits(b)
 	case stepSummary:
 		footer = footerSummary
+		f.drawSummary(b)
 	}
-	foot := wrap(footer, cols-1)
-	if f.step < stepSummary {
-		sc.para("", stepTexts[f.step])
-	} else {
-		sc.para("", summaryText)
-	}
-	sc.text("")
-	sc.bodyHeight = rows - len(sc.lines) - 2 - len(foot) // a blank line, the message, the footer
-	top := len(sc.lines)
-	switch f.step {
-	case stepFrom:
-		f.drawField(sc, f.from, exampleFrom)
-	case stepKey:
-		f.drawField(sc, f.key, exampleKey)
-	case stepGuests:
-		f.drawGuests(sc)
-	case stepStorage:
-		f.drawStorages(sc)
-	case stepLimits:
-		f.drawLimits(sc)
-	case stepSummary:
-		f.drawSummary(sc)
-	}
-	if len(sc.lines) > top+sc.bodyHeight {
-		sc.lines = sc.lines[:top+max(sc.bodyHeight, 0)]
-	}
-	for len(sc.lines) < rows-1-len(foot) {
-		sc.text("")
-	}
-	sc.add(f.msg, func(s string) string { return f.colour("31", s) })
-	for _, l := range foot {
-		sc.add(l, func(s string) string { return f.colour("2", s) })
-	}
-
-	var b bytes.Buffer
-	b.WriteString("\x1b[?25l\x1b[H")
-	for i, l := range sc.lines {
-		if i >= rows {
+	for i, segs := range b.lines {
+		if i >= inner {
 			break
 		}
-		b.WriteString(l + "\x1b[K")
-		if i < rows-1 && i < len(sc.lines)-1 {
-			b.WriteString("\r\n")
+		x := bx
+		for _, s := range segs {
+			x += retro.Put(screen, x, by+i, bx+b.w-x, s.s, s.st)
+		}
+		if b.fill[i] && len(segs) > 0 {
+			retro.Fill(screen, x, by+i, bx+b.w-x, 1, ' ', segs[len(segs)-1].st)
 		}
 	}
-	b.WriteString("\x1b[J")
-	if sc.curRow > 0 && sc.curRow <= rows {
-		fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", sc.curRow, sc.curCol)
+
+	// the lower boxes: where the admin is, and the help or the rule that was broken
+	f.drawProgress(screen, l)
+	hb := t.Box("Help")
+	hb.SetRect(l.RightX, l.LowerY, l.RightW(), retro.LowerHeight)
+	hb.Draw(screen)
+	hx, hy, hw, hh := hb.GetInnerRect()
+	hx, hw = hx+1, hw-2
+	var hl []seg
+	if f.msg != "" {
+		for _, s := range retro.Wrap(f.msg, hw) {
+			hl = append(hl, seg{s, t.Error})
+		}
 	}
-	_, _ = f.out.Write(b.Bytes())
+	// the help shows below the rule only when all of it fits
+	if hlp := retro.Wrap(help, hw); len(hl) == 0 || len(hl)+len(hlp) <= hh {
+		for _, s := range hlp {
+			hl = append(hl, seg{s, t.Base})
+		}
+	}
+	for i := 0; i < len(hl) && i < hh; i++ {
+		retro.Put(screen, hx, hy+i, hw, hl[i].s, hl[i].st)
+	}
+
+	t.BottomBar(screen, l.BottomBarY, cols, footer, t.Bar, programName)
+
+	if b.curRow >= 0 && b.curRow < inner && b.curRow < len(b.lines) {
+		screen.ShowCursor(bx+b.curCol, by+b.curRow)
+	} else {
+		screen.HideCursor()
+	}
 }
 
-// drawField draws a text field. Empty, it shows the example in grey; a long value shows its
-// end. With NO_COLOR the example is a line of its own.
-func (f *form) drawField(sc *screen, value, example string) {
-	const prefix = "  > "
-	w := sc.cols - 1 - len(prefix) - 1
+// drawProgress draws the left lower box: the step and its share of the way, a track of
+// the steps done, the step's name and the job.
+func (f *form) drawProgress(screen tcell.Screen, l retro.Layout) {
+	t := f.t
+	pb := t.Box("Progress")
+	pb.SetRect(1, l.LowerY, l.LeftW, retro.LowerHeight)
+	pb.Draw(screen)
+	x, y, w, _ := pb.GetInnerRect()
+	x, w = x+1, w-2
+	step, name := "Summary", "Check and install"
+	if f.step < stepSummary {
+		step, name = fmt.Sprintf("Step %d of %d", f.step+1, len(stepTitles)), stepTitles[f.step]
+	}
+	pct := f.step * 100 / len(stepTitles)
+	retro.LeftRight(screen, x, y, w, step, fmt.Sprintf("%d%%", pct), t.Base)
+	t.Progress(screen, x, y+1, w, float64(pct)/100)
+	retro.Center(screen, x, y+2, w, name, t.Base)
+	retro.Center(screen, x, y+3, w, "Proxmox host setup", t.Base)
+}
+
+// drawField draws a text field after "> ". Empty, it shows the example in grey; a long
+// value shows its end.
+func (f *form) drawField(b *body, value, example string) {
+	const prefix = "> "
+	w := b.w - len(prefix) - 1
 	shown := value
 	if r := []rune(value); len(r) > w {
-		shown = "…" + string(r[len(r)-w+1:])
+		more := "…"
+		if f.t.ASCII {
+			more = "<"
+		}
+		shown = more + string(r[len(r)-w+1:])
 	}
-	sc.curRow, sc.curCol = len(sc.lines)+1, len(prefix)+utf8.RuneCountInString(shown)+1
-	if value == "" && f.color {
-		sc.lines = append(sc.lines, prefix+f.sgr("2", cut(example, w)))
+	b.curRow, b.curCol = len(b.lines), len(prefix)+retro.Width(shown)
+	if value == "" {
+		b.add(true, seg{prefix, f.t.Base}, seg{retro.Cut(example, w), f.t.Example}, seg{"", f.t.Field})
 	} else {
-		sc.text(prefix + shown)
-	}
-	if !f.color {
-		sc.text("")
-		sc.text("    e.g. " + example)
+		b.add(true, seg{prefix, f.t.Base}, seg{shown, f.t.Field})
 	}
 }
 
@@ -701,27 +706,22 @@ func window(top, cur, n, h int) int {
 	return max(min(top, n-h), 0)
 }
 
-// drawList draws a scrolling list with a header; row i is text(i), the cursor row has ">".
-// below rows of the body are kept free for lines after the list.
-func (f *form) drawList(sc *screen, below int, header string, n, cur int, top *int, text func(i int) string) {
-	h := sc.bodyHeight - 3 - below
+// drawList draws a scrolling list with a header; row i is text(i).
+func (f *form) drawList(b *body, header string, n, cur int, top *int, text func(i int) string) {
+	h := b.bodyHeight - 3
 	*top = window(*top, cur, n, h)
-	sc.add("    "+header, func(s string) string { return f.sgr("1", s) })
+	b.add(false, seg{header, f.t.Strong})
 	if *top > 0 {
-		sc.text(fmt.Sprintf("    (%d more above)", *top))
+		b.text(fmt.Sprintf("  (%d more above)", *top))
 	} else {
-		sc.text("")
+		b.text("")
 	}
 	end := min(*top+max(h, 1), n)
 	for i := *top; i < end; i++ {
-		if i == cur {
-			sc.add("  > "+text(i), func(s string) string { return f.sgr("7", s) })
-		} else {
-			sc.text("    " + text(i))
-		}
+		f.row(b, i == cur, text(i))
 	}
 	if end < n {
-		sc.text(fmt.Sprintf("    (%d more below)", n-end))
+		b.text(fmt.Sprintf("  (%d more below)", n-end))
 	}
 }
 
@@ -735,37 +735,27 @@ func (f *form) isTicked(vmid string) bool {
 	return false
 }
 
-func (f *form) drawGuests(sc *screen) {
+func (f *form) drawGuests(b *body) {
 	nw := 4
 	for _, g := range f.gs {
-		nw = max(nw, utf8.RuneCountInString(g.name))
+		nw = max(nw, retro.Width(g.name))
 	}
-	f.drawList(sc, 2, fmt.Sprintf("    %-9s  %-*s  %s", "NUMBER", nw, "NAME", "STATUS"), len(f.gs), f.gCur, &f.gTop,
+	f.drawList(b, fmt.Sprintf("      %-9s  %-*s  %s", "NUMBER", nw, "NAME", "STATUS"), len(f.gs), f.gCur, &f.gTop,
 		func(i int) string {
 			g := f.gs[i]
-			box := "[ ]"
-			if f.isTicked(g.vmid) {
-				box = "[x]"
-			}
-			return fmt.Sprintf("%s %-9s  %-*s  %s", box, g.vmid, nw, g.name, g.status)
+			return fmt.Sprintf("%s %-9s  %-*s  %s", retro.Checkbox(f.isTicked(g.vmid)), g.vmid, nw, g.name, g.status)
 		})
-	sc.text("")
-	sc.text(fmt.Sprintf("  %d ticked", len(f.ticked)))
 }
 
-func (f *form) drawStorages(sc *screen) {
+func (f *form) drawStorages(b *body) {
 	nw := 4
 	for _, st := range f.sts {
-		nw = max(nw, utf8.RuneCountInString(st.name))
+		nw = max(nw, retro.Width(st.name))
 	}
-	f.drawList(sc, 0, fmt.Sprintf("    %-*s  %-10s  %s", nw, "NAME", "TYPE", "FREE GiB"), len(f.sts), f.sCur, &f.sTop,
+	f.drawList(b, fmt.Sprintf("      %-*s  %-10s  %s", nw, "NAME", "TYPE", "FREE GiB"), len(f.sts), f.sCur, &f.sTop,
 		func(i int) string {
 			st := f.sts[i]
-			mark := "( )"
-			if i == f.sCur {
-				mark = "(*)"
-			}
-			return fmt.Sprintf("%s %-*s  %-10s  %8d", mark, nw, st.name, st.typ, st.freeGiB)
+			return fmt.Sprintf("%s %-*s  %-10s  %8d", retro.Radio(i == f.sCur), nw, st.name, st.typ, st.freeGiB)
 		})
 }
 
@@ -779,43 +769,29 @@ func (f *form) limitLines() []string {
 	}
 }
 
-func (f *form) drawLimits(sc *screen) {
+func (f *form) drawLimits(b *body) {
 	if !f.editing {
 		for _, l := range f.limitLines() {
-			sc.text("    " + l)
+			b.text("  " + l)
 		}
-		sc.text("")
+		b.text("")
 		for i, c := range limitChoices {
-			if i == f.limCur {
-				sc.add("  > "+c, func(s string) string { return f.sgr("7", s) })
-			} else {
-				sc.text("    " + c)
-			}
+			f.row(b, i == f.limCur, c)
 		}
 		return
 	}
-	// all four sentences when they fit, else only the one of the field being edited
-	all := len(limitFields)
-	for _, fl := range limitFields {
-		all += len(wrap(fl.help, sc.cols-1-6))
-	}
 	for i, fl := range limitFields {
-		prefix := "    "
+		label := fmt.Sprintf("%s%-26s ", f.mark(i == f.field), fl.label)
 		if i == f.field {
-			prefix = "  > "
-		}
-		line := fmt.Sprintf("%s%-26s %s", prefix, fl.label, f.lim[i])
-		if i == f.field {
-			sc.curRow, sc.curCol = len(sc.lines)+1, utf8.RuneCountInString(cut(line, sc.cols-1))+1
-		}
-		sc.text(line)
-		if all <= sc.bodyHeight || i == f.field {
-			sc.para("      ", fl.help)
+			b.curRow, b.curCol = len(b.lines), retro.Width(label)+retro.Width(f.lim[i])
+			b.add(false, seg{label, f.t.Strong}, seg{f.lim[i] + " ", f.t.Field})
+		} else {
+			b.text(label + f.lim[i])
 		}
 	}
 }
 
-func (f *form) drawSummary(sc *screen) {
+func (f *form) drawSummary(b *body) {
 	names := map[string]string{}
 	for _, g := range f.gs {
 		names[g.vmid] = g.name
@@ -825,21 +801,22 @@ func (f *form) drawSummary(sc *screen) {
 		s := strconv.Itoa(id)
 		guests = append(guests, s+" ("+names[s]+")")
 	}
+	const lw = 20 // the label column
 	key := f.v.Pubkey
-	if w := sc.cols - 1 - 22; utf8.RuneCountInString(key) > w && w > 30 {
+	if w := b.w - lw; retro.Width(key) > w && w > 30 {
 		key = key[:w-13] + "..." + key[len(key)-10:]
 	}
 	var rows []string
 	row := func(label, value string) {
-		lines := wrap(value, sc.cols-1-22)
+		lines := retro.Wrap(value, b.w-lw)
 		if len(lines) == 0 {
 			lines = []string{""}
 		}
 		for i, l := range lines {
 			if i == 0 {
-				rows = append(rows, fmt.Sprintf("  %-18s  %s", label, l))
+				rows = append(rows, fmt.Sprintf("%-18s  %s", label, l))
 			} else {
-				rows = append(rows, strings.Repeat(" ", 22)+l)
+				rows = append(rows, strings.Repeat(" ", lw)+l)
 			}
 		}
 	}
@@ -851,24 +828,28 @@ func (f *form) drawSummary(sc *screen) {
 	row("", fmt.Sprintf("stop below %d GiB free", f.v.AbortFreeGiB))
 	row("", fmt.Sprintf("read %s MiB/s, %d at a time", mib(f.v.BwlimitKiB), f.v.MaxWorkers))
 	row("Backup user", f.v.User)
-	// the buttons always show; a summary longer than the terminal is cut short
-	if avail := sc.bodyHeight - 2; len(rows) > avail {
-		rows = append(rows[:max(avail-1, 0)], strings.Repeat(" ", 22)+"...")
+	// a blank line and the buttons always show; a summary longer than the box is cut short
+	avail := b.bodyHeight - 2
+	if len(rows) > avail {
+		rows = append(rows[:max(avail-1, 0)], strings.Repeat(" ", lw)+"...")
 	}
+	b.text("")
 	for _, r := range rows {
-		sc.text(r)
+		b.text(r)
 	}
-	sc.text("")
-	line := "  "
-	for i, b := range buttons {
+	if len(rows) < avail { // a blank line above the buttons when there is room
+		b.text("")
+	}
+	var segs []seg
+	for i, label := range buttons {
+		st := f.t.Base
 		if i == f.button {
-			line += f.sgr("7", b)
-		} else {
-			line += b
+			st = f.t.Focus
 		}
+		segs = append(segs, seg{label, st})
 		if i < len(buttons)-1 {
-			line += "  "
+			segs = append(segs, seg{"  ", f.t.Base})
 		}
 	}
-	sc.lines = append(sc.lines, line)
+	b.add(false, segs...)
 }

@@ -1,0 +1,217 @@
+# House style: the retro disk-tool look
+
+Every full-screen view of this project (the install form on the Proxmox host, the setup and key
+screens on the backup machine, the backup view, the restore screens) looks like one program: a
+DOS-era disk tool. A blue screen, white text, thin single-line boxes with yellow titles, a grey
+bar on top and a grey message bar at the bottom, yellow as the one highlight. The backup view is
+the centrepiece: a map of blocks for the whole disk, and a yellow run that grows left to right,
+top to bottom, line by line.
+
+The look is an homage in layout, characters, colours and movement. Names, logos and product
+texts of the original are not used anywhere on our screens. We call it the retro disk-tool look.
+
+Without a terminal, with `TERM=dumb` or on a terminal that is too small, every program falls back
+to plain lines. With `NO_COLOR` the layout stays and the colours go.
+
+## 1. The reference
+
+The reference is the full-screen disk defragmenter that came with MS-DOS 6.x. Microsoft licensed
+it from Symantec and it is a cut-down version of that vendor's own optimizer, which is why both
+look alike. We worked from pictures, not from memory.
+
+### Sources
+
+| | Source | What it is |
+|---|---|---|
+| R1 | The operator's reference picture (2026-11-17, not in this repository) | Capture of the map, Status and Legend boxes mid-run, from an emulator |
+| R2 | Thumbnail of the video "DOS Defrag (ASMR)", youtube.com/watch?v=Nidwz3BzFCM | Full screen in an emulator, writing, 11 % done |
+| R3 | Thumbnail of a video of the program on a real CRT, youtube.com/watch?v=lhjgVovLkXY | Photo of real hardware, 51 % done |
+| R4 | Microsoft Knowledge Base Q105068, Q103555 (archived at jeffpar.github.io/kbarchive) | `X` marks unmovable blocks on the drive map |
+| R5 | Microsoft Knowledge Base Q120962 | The program's copyright line names Symantec; unchanged in MS-DOS 6.22 |
+| R6 | Wikipedia, "Microsoft Drive Optimizer" | The MS-DOS 6 program is a licensed, cut-down version of the Norton optimizer |
+| R7 | photogabble.co.uk, "Defrag like it's 1992" | Write-up of two browser recreations: `r` reading, `W` writing, `B` bad, `X` unmovable |
+
+R2 and R3 are video thumbnails (single frames); we did not watch the videos. R7 describes
+recreations, not the original; it is used only where it agrees with R1 to R3.
+
+### Confirmed (with the source)
+
+- **Layout** (R1, R2, R3). Row 1: a light grey bar, the menu word at the left in black, a key
+  label at the right in inverse (white on black) while the program works. Rows 2 to about 18: the
+  map, edge to edge, no frame. Below it, side by side, two boxes with thin single-line white
+  frames and their titles centred in the top line in yellow: **Status** on the left, **Legend**
+  on the right. Last row: a light grey bar with a status word in dark red on the left
+  ("Writing...", "Reading...", "Updating FAT") and, after a vertical line, the program's name in
+  dark red on the right.
+- **Map** (R1, R2, R3). One character cell per block, many blocks per cluster group
+  ("1 block = 54 clusters"). Cells sit in rows left to right, rows top to bottom. The last row
+  stops where the disk ends; the rest of that row is plain background (R1, R2).
+- **Cells** (R1, R2, R3, legend text in R1 and R2). Used: a white tall cell with a small dark dot
+  in its middle (it looks like the code page 437 inverse bullet `◘`). Unused: a light shaded
+  cell (looks like `░`, light shade). Done blocks: the same dotted cell in yellow. Reading: `r`.
+  Writing: `W`. Bad: `B`. Unmovable: `X` (R1, R2, R4). The legend lists them in two columns:
+  Used / Unused, Reading / Writing, Bad / Unmovable, then "Drive C: 1 block = N clusters".
+- **Colours** (R1, R2, R3). Blue screen, white text and frames, yellow box titles and done blocks,
+  grey bars with black text, dark red text on the bottom bar.
+- **Status box** (R1, R2, R3). Line 1: "Cluster N" left, "P%" right. Line 2: a progress track the
+  width of the box: shaded when empty, solid white where done (R2, R3). Line 3: "Elapsed Time:
+  hh:mm:ss", centred. Line 4: the method ("Full Optimization"), centred.
+- **Movement** (R1, R2, R3 as stills). The yellow run starts in the top-left corner and grows
+  along the rows; `W` cells stand at the end of the yellow run (R2); the rest of the map is still
+  white and shaded. The operator describes the motion as "a yellow progress bar that moves left
+  to right, top to bottom, line by line".
+- **Frames** (R1, R2, R3). Thin single lines; no double lines, no shadows.
+
+### Not confirmed, or sources disagree
+
+- **The exact blue.** Emulator captures (R1, R2) show a light blue, about `#5555FF`; the CRT photo
+  (R3) shows a deeper blue, nearer `#0000AA`. R1 is binding for us, so we use `#5555FF`.
+- **The exact characters.** The used and unused cells are judged from their shape; we could not
+  confirm the code points from a manual. `◘` (CP437 0x08) and `░` (CP437 0xB0) match the pictures.
+- **The motion in time.** We saw stills only: how fast the marker moves, whether `r` and `W`
+  alternate per cell, and how the map looks between frames are not confirmed.
+- **The ancestor optimizer's own screen.** We found no picture of it; nothing here relies on it.
+- **The idle key label** ("F1=Help" instead of the stop key) appears only in a recreation (R7).
+- **The gaps between cells.** In R1 every cell column is separated by a thin line of
+  background. That is the ninth pixel column of the VGA text font, which stays blank for these
+  characters. A modern terminal draws shades and blocks edge to edge, so our map has no gaps.
+
+## 2. Our rules
+
+These rules hold whatever library draws the screen.
+
+### Palette
+
+| Role | Truecolor / 256 colours | 16 colours | 8 colours | No colour (`NO_COLOR`) |
+|---|---|---|---|---|
+| Screen background | `#5555FF` | 12 bright blue | 4 blue | terminal default |
+| Text, frames, blocks with data | `#FFFFFF` | 15 bright white | 7 white + bold | default |
+| Box titles, done blocks, focus background | `#FFFF55` | 11 bright yellow | 3 yellow + bold | bold; focus inverse |
+| Title bar and bottom bar | `#AAAAAA` background, `#000000` text | 7 / 0 | 7 / 0 | inverse |
+| Key label on the title bar | `#FFFFFF` on `#000000` | 15 on 0 | 7 + bold on 0 | default |
+| Status word, program name on the bottom bar | `#AA0000` on `#AAAAAA` | 1 on 7 | 1 on 7 | inverse + bold |
+| Text field | `#FFFFFF` on `#0000AA` | 15 on 4 | 7 + bold on 0 | underline |
+| Example in an empty field | `#AAAAAA` on `#0000AA` | 7 on 4 | 7 on 0 | dim + underline |
+| Error | `#FFFFFF` bold on `#AA0000` | 15 on 1 | 7 on 1 | bold |
+| Focused row or button | `#5555FF` on `#FFFF55` | 12 on 11 | 4 on 3 | inverse |
+
+With 256 colours the exact values are matched to the nearest palette entry (`#5f5fff`,
+`#ffff5f`, ...). With 8 colours the screen is the dark blue of the CRT photo and bold makes the
+white and the yellow bright, as on the Linux console. Colour depth comes from the terminal
+description (`TERM`, `COLORTERM=truecolor`); `NO_COLOR` set to anything turns colours off.
+
+### Characters
+
+The look of code page 437 through Unicode; plain ASCII when the character set of the locale is
+not UTF-8 (`LC_ALL`, `LC_CTYPE`, `LANG`; `C` and `POSIX` are ASCII).
+
+| Element | UTF-8 | ASCII |
+|---|---|---|
+| Frame | `┌ ┐ └ ┘ ─ │` | `+ + + + - \|` |
+| Separator on the bottom bar | `│` | `\|` |
+| Block with data, done block (in colour) | `◘` | `o` |
+| Empty block, empty part of a progress track | `░` | `.` |
+| Done part of a progress track; done block without colour | `█` | `#` |
+| Passed empty block without colour | `▒` | `:` |
+| Pointer in front of the focused row | `►` | `>` |
+| Middle dot between keys, ellipsis | `·` `…` | `-` `...` |
+
+### Screen anatomy
+
+```
+row 1        title bar    grey: " <program> · <where you are>"          inverse " <key>=<action> "
+rows 2..n-7  body         a framed box with the step's title (forms) or the map (backup view)
+rows n-6..n-1 lower boxes  two framed boxes side by side, four lines inside each
+row n        bottom bar   grey: keys or a status word                   "│ <program>" in red
+```
+
+- The lower boxes split the width in half, one column of margin at each edge and between them,
+  like Status and Legend in the reference.
+- Box titles are centred in the top frame line with one space on each side.
+- Text inside a box starts two columns in (one for the frame, one blank).
+- The smallest screen is 60 x 20. A smaller terminal gets plain lines.
+
+### Forms
+
+- **Main box**: titled with the step; first the explanation in two or three plain sentences,
+  then a blank line, then the field, the list or the summary.
+- **Text field**: `> ` and a navy field to the end of the line; the cursor at the end of the value.
+  Empty, it shows the example in grey; the example is never taken as the value. A value longer
+  than the field shows its end after `…`.
+- **Pick list** (one of many): rows `( ) name ...` and `(*)` on the chosen one.
+- **Checklist**: rows `[ ] name ...`, `[x]` when ticked; Space ticks.
+- **Focus**: the focused row or button is drawn yellow with blue text from the pointer `►` to the
+  end of the line; without colour in inverse video.
+- **Buttons**: `[ Install ]  [ Back ]  [ Cancel ]`, the focused one yellow.
+- **Lower left box "Progress"**: "Step n of 5" and the share of steps done, a progress track,
+  the step's name and the job, centred, like the Status box.
+- **Lower right box "Help"**: the short help for the current field (an example, the allowed range,
+  the count of ticked rows). A broken rule shows here first in the error colours; the help stays
+  below it when it still fits.
+- **Title bar**: program, step and its name on the left; `Ctrl-C=Cancel` on the right.
+- **Bottom bar**: the keys of this screen; `│ restic-pve` on the right.
+
+### The backup view (block map)
+
+```
+ <title bar: guest, kind of backup>                                   Esc=Stop
+ ◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘◘r◘░░░◘░░░◘◘░░░░◘░◘░░░░◘░░◘░░░◘◘◘◘◘░░░░░◘◘░░◘░░░◘◘░░◘◘◘
+ ░◘◘░░◘◘◘░░░░◘░░░◘░░◘░░░░░░░░░░░░◘░░░◘◘◘░░◘░░░░◘◘◘◘◘◘◘◘◘◘◘◘◘◘░◘░◘░░░░░◘◘░◘░░◘
+ ...                                                                    (the last row stops)
+ ┌────────────── Status ──────────────┐ ┌────────────── Legend ───────────────┐
+ │  Block 589                     1%  │ │  ◘ - Has data     ░ - Empty         │
+ │  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │ │  r - Reading      W - Writing       │
+ │       Elapsed Time: 00:00:22       │ │  ◘ - In backup                      │
+ │            Full backup             │ │  Guest 100:   1 block = 64 MiB      │
+ └────────────────────────────────────┘ └─────────────────────────────────────┘
+Reading...                                                          │ restic-pve
+```
+
+- **Map**: one cell per block, from the top-left, left to right, top to bottom, no frame, one
+  column of margin. The block size is the disk size divided by the cells that fit, rounded up to
+  whole MiB; the last row stops where the disk ends.
+- **Cell states** (character and colour as in the tables above):
+
+  | State | Meaning | Cell |
+  |---|---|---|
+  | Has data | holds data, not read yet in this run | white `◘` |
+  | Empty | holds no data | white `░` |
+  | Reading | being read now | white `r` |
+  | Writing | new data from it goes into the backup now | white `W` |
+  | In backup | read; its data is in the backup | yellow `◘` |
+  | Passed, empty | the marker went past it, nothing to keep | yellow `░` |
+
+  Bad (`B`) and unmovable (`X`) have no meaning in a backup and are not used.
+- **Movement**: the marker (`r`, then `W` while new data is written) moves one block at a time,
+  left to right, then on to the next row. Every block behind it turns yellow, so the yellow run
+  grows from the top-left like a progress bar. A full backup moves at an even pace and shows `W`
+  on every block with data. An incremental backup races over unchanged blocks (they turn yellow
+  without `W`) and stays on changed blocks, `r` and then `W`. The view only shows what the backup
+  really did; it never changes how the backup works.
+- **Status box**: "Block N" and the percentage; the progress track; "Elapsed Time: hh:mm:ss"; the
+  kind of run ("Full backup", "Incremental backup").
+- **Legend box**: the states in two columns as above, then "Guest <id>:   1 block = N MiB".
+- **Bottom bar**: the status word in red ("Reading...", "Writing...", "Finished."), and
+  `│ restic-pve` on the right.
+
+## 3. Where we differ from the reference, and why
+
+- **Our words.** Our menu bar names the program and the step, not a menu; our legend says
+  "Has data", "Empty", "In backup"; the bottom bar names our program. No product names.
+- **No `B` and `X`.** They have no meaning in a backup.
+- **Passed empty blocks turn yellow (shaded).** In the reference, data is moved to the front,
+  so the yellow run is solid. In a backup the empty blocks stay where they are; colouring them
+  yellow keeps the run continuous, so it still reads as one progress bar.
+- **No gaps between cells.** Terminals draw shade and block characters to the cell edges.
+- **The forms** have no counterpart in the reference. They borrow its parts: grey bars, the
+  blue screen, yellow box titles, the two lower boxes (Progress like Status, Help like Legend).
+- **Smallest size 60 x 20** instead of the fixed 80 x 25 text mode; the map fills whatever size
+  the terminal has.
+
+## 4. In this repository
+
+`internal/retro` holds the style: palette and characters (`Theme`), bars, framed boxes, the
+progress track, the block map, the Status and Legend boxes. It draws on `tcell` screens and
+builds on `tview` primitives and has no install code, so other programs of the project can import
+or copy it. `restic-pve demo` (and `restic-pve demo incremental`) shows the block map with a
+simulated run of a 125 GiB disk; it reads no data and is not in the usage line.

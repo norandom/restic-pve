@@ -5,6 +5,9 @@
 //	restic-pve update                                   root: replace itself with the latest signed release
 //	restic-pve uninstall                                root: remove the identity, its files and the binary
 //	restic-pve version                                  print the version
+//
+// Not in the usage line: restic-pve demo [full|incremental] shows the block map of the backup
+// view with a simulated run, to judge the retro look; it reads no data.
 package main
 
 import (
@@ -14,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/norandom/restic-pve/internal/demo"
 	"github.com/norandom/restic-pve/internal/install"
 	"github.com/norandom/restic-pve/internal/relkeys"
 	"github.com/norandom/restic-pve/internal/update"
@@ -52,6 +56,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		sys := install.Default(version, exe)
 		sys.Plain = len(args) == 2
 		return sys.Install()
+	case args[0] == "demo" && (len(args) == 1 || len(args) == 2 && (args[1] == "full" || args[1] == "incremental")):
+		if err := demo.Main(args[1:], os.Getenv); err != nil {
+			fmt.Fprintf(stderr, "restic-pve demo: %v\n", err)
+			return 1
+		}
+		return 0
 	case args[0] == "uninstall" && len(args) == 1:
 		return install.Default(version, "").Uninstall()
 	case args[0] == "update" && len(args) == 1:
