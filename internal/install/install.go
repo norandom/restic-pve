@@ -62,9 +62,12 @@ type System struct {
 	Chown      func(path string, uid, gid int) error
 	IsRoot     func() bool
 	Version    string
-	Stdin      *bufio.Reader // the answers, one per line
+	Stdin      *bufio.Reader // the answers, one per line, or the keys of the form
 	Stdout     io.Writer
 	Stderr     io.Writer
+	Term       Terminal                // the terminal on stdin and stdout; nil when there is none
+	Getenv     func(key string) string // TERM and NO_COLOR; nil means both unset
+	Plain      bool                    // install --plain: ask line by line even on a terminal
 }
 
 // Default returns the production system.
@@ -83,10 +86,13 @@ func Default(version, executable string) *System {
 		Stdin:      bufio.NewReader(os.Stdin),
 		Stdout:     os.Stdout,
 		Stderr:     os.Stderr,
+		Term:       newTTY(),
+		Getenv:     os.Getenv,
 	}
 }
 
-// Install asks for the site values on stdin and installs the identity. It returns the
+// Install asks for the site values (the form on a terminal, else line by line on stdin) and
+// installs the identity. It returns the
 // exit code: 0 done, 1 not root, not a PVE host, stopped before the install (nothing
 // changed) or a step failed.
 func (s *System) Install() int {
@@ -115,7 +121,8 @@ func (s *System) Install() int {
 	return 0
 }
 
-// ask lists the guests and storages, asks the questions and the confirmation.
+// ask lists the guests and storages, then shows the form or asks the questions and the
+// confirmation.
 func (s *System) ask() (*Values, error) {
 	gs, err := s.guests()
 	if err != nil {
@@ -130,6 +137,11 @@ func (s *System) ask() (*Values, error) {
 	}
 	if len(sts) == 0 {
 		return nil, errors.New("pvesm status shows no active storage for fleecing")
+	}
+	if s.useForm() {
+		if v, err := s.form(s.current(), gs, sts); !errors.Is(err, errNoForm) {
+			return v, err
+		}
 	}
 	fmt.Fprintf(s.Stdout, "restic-pve %s install. Enter takes the value in [brackets].\n\n", s.Version)
 	v, err := s.questions(s.current(), gs, sts)

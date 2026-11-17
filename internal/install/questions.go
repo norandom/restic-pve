@@ -107,7 +107,24 @@ func checkNumber(key, s string) (int, error) {
 	return v, nil
 }
 
+// checkAbort parses FLEECING_ABORT_FREE_GIB, which must be below min (FLEECING_MIN_FREE_GIB).
+func checkAbort(s string, min int) (int, error) {
+	v, err := checkNumber("FLEECING_ABORT_FREE_GIB", s)
+	if err == nil && v >= min {
+		err = fmt.Errorf("FLEECING_ABORT_FREE_GIB must be below FLEECING_MIN_FREE_GIB (%d)", min)
+	}
+	return v, err
+}
+
 const maxBwlimitMiB = 976562 // BWLIMIT_KIB has at most 9 digits
+
+// roundMiB is BWLIMIT_KIB as whole MiB/s (at least 1), the default of the read limit question.
+func roundMiB(kib int) int {
+	if m := (kib + 512) / 1024; m > 1 {
+		return m
+	}
+	return 1
+}
 
 func checkBwlimitMiB(s string) (int, error) {
 	v, err := strconv.Atoi(s)
@@ -278,13 +295,13 @@ func (s *System) current() *Values {
 func (s *System) questions(def *Values, gs []guest, sts []storage) (*Values, error) {
 	a := &asker{in: s.Stdin, out: s.Stdout}
 	v := *def
-	err := a.ask("Backup host address the key is accepted from (authorized_keys from=)", def.From,
+	err := a.ask("Backup machine address the key is accepted from, e.g. "+exampleFrom+" (authorized_keys from=)", def.From,
 		func(x string) error { v.From = x; return checkFrom(x) })
 	if err != nil {
 		return nil, err
 	}
-	err = a.ask("Public key of the backup identity, one line 'ssh-ed25519 AAAA... [comment]'\n"+
-		"(./setup.sh --proxmox on the backup host shows it)", def.Pubkey,
+	err = a.ask("Public key of the backup identity, the whole line, e.g. "+exampleKey+"\n"+
+		"(./setup.sh --proxmox on the backup machine shows it)", def.Pubkey,
 		func(x string) (err error) { v.Pubkey, err = checkPubkey(x); return err })
 	if err != nil {
 		return nil, err
@@ -335,20 +352,11 @@ func (s *System) limitQuestions(a *asker, def, v *Values) error {
 		return err
 	}
 	err = a.ask("Free GiB below which a running backup stops (FLEECING_ABORT_FREE_GIB)", strconv.Itoa(def.AbortFreeGiB),
-		func(x string) (err error) {
-			if v.AbortFreeGiB, err = checkNumber("FLEECING_ABORT_FREE_GIB", x); err == nil && v.AbortFreeGiB >= v.MinFreeGiB {
-				err = fmt.Errorf("FLEECING_ABORT_FREE_GIB must be below FLEECING_MIN_FREE_GIB (%d)", v.MinFreeGiB)
-			}
-			return err
-		})
+		func(x string) (err error) { v.AbortFreeGiB, err = checkAbort(x, v.MinFreeGiB); return err })
 	if err != nil {
 		return err
 	}
-	defMiB := (def.BwlimitKiB + 512) / 1024
-	if defMiB < 1 {
-		defMiB = 1
-	}
-	err = a.ask("Read limit in MiB/s (stored as BWLIMIT_KIB)", strconv.Itoa(defMiB),
+	err = a.ask("Read limit in MiB/s (stored as BWLIMIT_KIB)", strconv.Itoa(roundMiB(def.BwlimitKiB)),
 		func(x string) error { n, err := checkBwlimitMiB(x); v.BwlimitKiB = n * 1024; return err })
 	if err != nil {
 		return err

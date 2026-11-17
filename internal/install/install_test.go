@@ -44,6 +44,7 @@ var (
 type fakeHost struct {
 	root          string
 	user          string
+	qm            string // the output of qm list
 	cmds          []string
 	owners        map[string]string
 	exists        bool
@@ -67,7 +68,7 @@ func newHost(t *testing.T) *fakeHost {
 			t.Fatal(err)
 		}
 	}
-	h := &fakeHost{root: root, user: DefaultUser, owners: map[string]string{}, exe: filepath.Join(t.TempDir(), "restic-pve"), exeBytes: "binary v1\n"}
+	h := &fakeHost{root: root, user: DefaultUser, qm: qmList, owners: map[string]string{}, exe: filepath.Join(t.TempDir(), "restic-pve"), exeBytes: "binary v1\n"}
 	if err := os.WriteFile(h.exe, []byte(h.exeBytes), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func (h *fakeHost) run(name string, args ...string) ([]byte, error) {
 	u := h.user
 	switch {
 	case cmd == "qm list":
-		return []byte(qmList), nil
+		return []byte(h.qm), nil
 	case cmd == "pvesm status":
 		return []byte(pvesmStatus), nil
 	case cmd == "getent passwd "+u:
@@ -177,8 +178,9 @@ func TestInstallFreshHostThenEnterOnly(t *testing.T) {
 	}
 	out := h.out.String()
 	for _, want := range []string{
-		"Backup host address the key is accepted from (authorized_keys from=): ",
-		"(./setup.sh --proxmox on the backup host shows it): ",
+		"Backup machine address the key is accepted from, e.g. 192.0.2.10 (authorized_keys from=): ",
+		"the whole line, e.g. ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n",
+		"(./setup.sh --proxmox on the backup machine shows it): ",
 		"  100   web      running\n", "  102   scratch  stopped\n",
 		"VM numbers to back up, separated by spaces or commas: ",
 		"  fast-ssd  lvmthin  819\n", "  local     dir      77\n",

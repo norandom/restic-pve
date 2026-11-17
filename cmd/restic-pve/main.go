@@ -1,7 +1,7 @@
 // Command restic-pve is the one binary of the backup identity on a Proxmox VE host.
 //
 //	restic-pve request <ping|info <vmid>|dump <vmid>>   forced command (through sudo)
-//	restic-pve install                                  root: asks for the site values, installs or changes the identity
+//	restic-pve install [--plain]                        root: asks for the site values, installs or changes the identity
 //	restic-pve update                                   root: replace itself with the latest signed release
 //	restic-pve uninstall                                root: remove the identity, its files and the binary
 //	restic-pve version                                  print the version
@@ -26,7 +26,7 @@ var (
 	releaseRepo = "norandom/restic-pve"
 )
 
-const usage = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install | update | uninstall | version"
+const usage = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install [--plain] | update | uninstall | version"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -43,13 +43,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case args[0] == "version" && len(args) == 1:
 		fmt.Fprintln(stdout, version)
 		return 0
-	case args[0] == "install" && len(args) == 1:
+	case args[0] == "install" && (len(args) == 1 || len(args) == 2 && args[1] == "--plain"):
 		exe, err := executable()
 		if err != nil {
 			fmt.Fprintf(stderr, "restic-pve: %v\n", err)
 			return 1
 		}
-		return install.Default(version, exe).Install()
+		sys := install.Default(version, exe)
+		sys.Plain = len(args) == 2
+		return sys.Install()
 	case args[0] == "uninstall" && len(args) == 1:
 		return install.Default(version, "").Uninstall()
 	case args[0] == "update" && len(args) == 1:

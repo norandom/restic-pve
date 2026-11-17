@@ -1,6 +1,8 @@
 # restic-pve
 
-`restic-pve` is one static Go binary for a Proxmox VE host. It lets a backup host pull a
+First time on a Proxmox VE host? Read [docs/onboarding.md](docs/onboarding.md).
+
+`restic-pve` is one static Go binary for a Proxmox VE host. It lets a backup machine pull a
 consistent image of a guest over SSH (`vzdump --stdout`) without root SSH and without any other
 software on the hypervisor. Stdlib only, no dependencies.
 
@@ -20,9 +22,11 @@ In a root shell on the Proxmox VE host:
 curl -fsSLo /usr/local/sbin/restic-pve https://github.com/norandom/restic-pve/releases/latest/download/restic-pve-linux-amd64 && chmod 755 /usr/local/sbin/restic-pve && restic-pve install
 ```
 
-`install` asks for the backup host address, its public key, the guests and the storage for
-fleecing images, shows a summary and asks before it changes anything. Run `restic-pve install`
-again to change a value.
+`install` opens a form in the terminal, one screen per value: the backup machine address, its public
+key, the guests (a checklist), the storage for fleecing images (a list), the limits and a summary
+with `[ Install ]`. Nothing changes before Install. Run `restic-pve install` again to change a
+value. Without a terminal, or with `restic-pve install --plain`, it asks the same questions line
+by line.
 
 The host then updates itself: `restic-pve-update.timer` runs `restic-pve update` daily, which
 accepts only a newer release whose checksums are signed with a key built into the installed
@@ -38,7 +42,7 @@ shows how to check it against the signed checksums.
 | `request ping` | backup identity (forced command, sudo) | prints `ok` |
 | `request info <vmid>` | backup identity | one JSON line: guest, disks, fleecing state, conf values, PVE and binary version |
 | `request dump <vmid>` | backup identity | `vzdump --stdout` VMA stream on stdout, vzdump log on stderr |
-| `install` | root | asks for the site values on the terminal, installs or changes the identity |
+| `install [--plain]` | root | asks for the site values (form, or line by line), installs or changes the identity |
 | `update` | root | replaces itself with the latest signed release |
 | `uninstall` | root | removes the identity, its files and the binary |
 | `version` | anyone | prints the version |
@@ -74,26 +78,42 @@ the binary and is refused with exit 64.
 
 ### install
 
-`install` takes no argument (an argument is exit 64). It runs as root on a PVE host only: when
-`qm` or `pvesm` is not in `/usr/sbin:/usr/bin:/sbin:/bin` it stops with one line. It reads one
-answer per line from stdin and writes the questions to stdout. Enter takes the default in
-brackets; an invalid answer prints its rule and the question comes again; three invalid answers,
-or stdin at its end (`no terminal to ask on`), stop with exit 1 and nothing changed.
+`install` takes no argument or `--plain` (anything else is exit 64). It runs as root on a PVE
+host only: when `qm` or `pvesm` is not in `/usr/sbin:/usr/bin:/sbin:/bin` it stops with one line.
+The values and their rules:
 
-1. backup host address for `from=` (`^[A-Za-z0-9.:,*?!/_-]{1,255}$`)
+1. backup machine address for `from=` (`^[A-Za-z0-9.:,*?!/_-]{1,255}$`)
 2. public key, one line `ssh-ed25519 <base64> [comment]` (a real ed25519 key blob; only type and
    key are stored)
-3. VM numbers, separated by spaces or commas, each once, each listed by `qm list` (printed first)
-4. fleecing storage, one of the active storages of `pvesm status` (printed first)
-5. `Change the limits? [y/N]`; on `y`: `FLEECING_MIN_FREE_GIB`, `FLEECING_ABORT_FREE_GIB` (below
-   the first), the read limit in MiB/s (stored as `BWLIMIT_KIB`), `MAX_WORKERS` (1-16)
+3. guests, each once, each listed by `qm list`, at least one
+4. fleecing storage, one of the active storages of `pvesm status`
+5. the limits: `FLEECING_MIN_FREE_GIB`, `FLEECING_ABORT_FREE_GIB` (below the first), the read
+   limit in MiB/s (stored as `BWLIMIT_KIB`), `MAX_WORKERS` (1-16)
+
+**Form.** When stdin and stdout are a terminal, `TERM` is set and not `dumb`, the terminal is at
+least 60x20 and `--plain` is not given, install shows a full-screen form (raw mode, alternate
+screen, plain ANSI sequences; the terminal is restored on exit, Ctrl-C, SIGTERM, SIGHUP and
+panic). One screen per value: text fields for address and key (an empty field shows a grey
+example that is never taken as the value; with `NO_COLOR` the example is an `e.g.` line), a
+checklist of `qm list` (Up/Down or j/k, Space ticks), a single choice of the active storages
+with free GiB, the limits with "Keep these (recommended)" or "Change" (four number fields), and a
+summary with `[ Install ]  [ Back ]  [ Cancel ]`, focus on Install. Enter continues when the value
+is valid, else its rule shows and the screen stays; Esc or Shift-Tab goes one screen back with the
+values kept; Ctrl-C or Cancel is exit 1 and nothing changed. A pasted key with a trailing newline
+counts as Enter; bracketed paste is understood.
+
+**Plain** (`--plain`, or no terminal). One answer per line from stdin, the questions on stdout,
+with an example for address and key. Enter takes the default in brackets; an invalid answer
+prints its rule and the question comes again; three invalid answers, or stdin at its end
+(`no terminal to ask on`), stop with exit 1 and nothing changed. The guests are typed as VM
+numbers separated by spaces or commas; the limits follow `Change the limits? [y/N]`.
 
 The defaults on a fresh host: no address, no key, no guests, no storage, limits 32 / 8 GiB,
 40 MiB/s, 1 worker. On an installed host they are the current values: address and key from the
 backup user's `authorized_keys`, the rest from `/etc/restic-pve.conf`. The user is
 `restic-backup`; a different user in an existing `/etc/sudoers.d/restic-pve` (older install) is
-kept. A summary follows, then `Install with these values? [y/N]`; anything but `y` is exit 1 and
-nothing changed.
+kept. A summary follows; in plain mode then `Install with these values? [y/N]`, where anything
+but `y` is exit 1 and nothing changed.
 
 Install is idempotent and reports each file as `written` or `unchanged`: the sudo package
 (only if missing), the user (shell `/bin/sh`, password locked), `~/.ssh/authorized_keys`,
@@ -108,7 +128,7 @@ wrapper if present: `/usr/local/sbin/restic-vzdump`, `/etc/sudoers.d/restic-vzdu
 `/etc/restic-vzdump.conf` and `/etc/restic-vzdump.allow`. A new guest or a changed limit is the
 same install again.
 
-`install` reads the answers from its own stdin, the terminal. On the PVE host the binary is
+`install` reads the answers or keys from its own stdin, the terminal. On the PVE host the binary is
 downloaded straight to `/usr/local/sbin/restic-pve` and run from there; install then leaves the file in place and only sets owner and mode. Run
 from any other path, it copies itself there.
 
