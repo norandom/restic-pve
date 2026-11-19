@@ -190,16 +190,11 @@ func standInRestic(t *testing.T) (bin, log, codeFile string) {
 // entries are the two-line entries of the stand-in's log, sorted: parallel calls log in the
 // order they end.
 func entries(log string) string {
+	// Children run a few at a time, and each stand-in writes its argv line and its env line
+	// separately, so the lines of two children may interleave: compare the lines as a set.
 	l := strings.Split(strings.TrimSuffix(log, "\n"), "\n")
-	var e []string
-	for i := 0; i+1 < len(l); i += 2 {
-		e = append(e, l[i]+"\n"+l[i+1])
-	}
-	if len(l)%2 != 0 {
-		e = append(e, "odd: "+l[len(l)-1])
-	}
-	sort.Strings(e)
-	return strings.Join(e, "\n")
+	sort.Strings(l)
+	return strings.Join(l, "\n")
 }
 
 // everything is the text of every file below the folders.
