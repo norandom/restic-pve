@@ -1,5 +1,9 @@
 # Releases and signing
 
+This page is for the maintainer, the person who publishes new versions of this tool. An admin who
+installs and runs `restic-pve` needs none of it and never holds the release signing key; the
+installed binary only carries the public half.
+
 A release is built by GitHub Actions and published only after the repository owner approves it.
 `restic-pve update` accepts a release only when its checksums are signed with an Ed25519 key that
 is built into the installed binary. The private key exists in two places: the GitHub environment
