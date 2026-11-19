@@ -1,6 +1,7 @@
 package space
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -107,11 +108,13 @@ func (sc *Screen) Draw(s tcell.Screen, t retro.Theme) {
 
 // Options are what the space view needs from the command layer.
 type Options struct {
-	Screen  tcell.Screen
-	Color   bool
-	Title   string
-	Back    string
-	Read    func(refresh, cacheOnly bool) (Model, string) // the model and the "checked ..." text
+	Screen tcell.Screen
+	Color  bool
+	Title  string
+	Back   string
+	// Read gives the model and the "checked ..." text; ctx ends a storage read early, progress
+	// (nil: not wanted) is told how many repositories answered.
+	Read    func(ctx context.Context, refresh, cacheOnly bool, progress func(m Model, done, total int)) (Model, string)
 	Stamp   func() string
 	Now     func() time.Time
 	Poll    time.Duration
@@ -125,14 +128,41 @@ type Options struct {
 func Run(o Options) error {
 	t := retro.NewTheme(o.Screen, o.Color)
 	sc := &Screen{Title: o.Title, Model: o.Initial, Back: o.Back, Checked: "reading…"}
+	// the read runs in a goroutine and hands each step back with Post, so sc is touched only
+	// on the loop; leaving stops it and waits until its children are gone
 	reading := false
+	var stop context.CancelFunc = func() {}
+	finished := make(chan struct{})
+	close(finished)
 	read := func(refresh bool) {
 		reading = true
+		ctx, cancel := context.WithCancel(context.Background())
+		mine := make(chan struct{})
+		stop, finished = cancel, mine
+		progress := func(m Model, done, total int) {
+			tui.Post(o.Screen, func() {
+				if finished == mine && reading && total > 0 {
+					sc.Model, sc.Checked = m, fmt.Sprintf("reading the storage %d of %d", done, total)
+				}
+			})
+		}
 		go func() {
-			m, checked := o.Read(refresh, false)
-			tui.Post(o.Screen, func() { sc.Model, sc.Checked, reading = m, checked, false })
+			defer close(mine)
+			m, checked := o.Read(ctx, refresh, false, progress)
+			if ctx.Err() != nil {
+				return
+			}
+			tui.Post(o.Screen, func() {
+				if finished == mine {
+					sc.Model, sc.Checked, reading = m, checked, false
+				}
+			})
 		}()
 	}
+	defer func() {
+		stop()
+		<-finished
+	}()
 	read(false)
 	return tui.Loop{
 		Screen: o.Screen, Theme: t, Poll: o.Poll, Idle: o.Idle, Now: o.Now, Ready: o.Ready,
@@ -160,7 +190,7 @@ func Run(o Options) error {
 		Stamp: o.Stamp,
 		Changed: func() {
 			if !reading {
-				sc.Model, sc.Checked = o.Read(false, true)
+				sc.Model, sc.Checked = o.Read(context.Background(), false, true, nil)
 			}
 		},
 	}.Run()

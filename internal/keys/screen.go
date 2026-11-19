@@ -1,6 +1,8 @@
 package keys
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,6 +35,11 @@ type Screen struct {
 	mode   int
 	buf    []byte // the pasted copy while it is entered; wiped after use
 	result Result
+	// done and total of the repositories the running proof opened; set only on the loop
+	done, total int
+	// the running proof: stop ends it, finished is closed when it returned
+	stop     context.CancelFunc
+	finished chan struct{}
 }
 
 // Plain is the key table as plain lines: no value, presence and state only.
@@ -191,6 +198,9 @@ func (sc *Screen) drawProof(s tcell.Screen, t retro.Theme) {
 	switch sc.mode {
 	case checking:
 		msg = "Checking the copy against every repository…"
+		if sc.total > 0 {
+			msg = fmt.Sprintf("Checking the copy against every repository: checking %d of %d.", sc.done, sc.total)
+		}
 	case result:
 		msg = sc.result.Text
 		if !sc.result.OK {
@@ -233,6 +243,12 @@ func Run(o Options) error {
 	t := retro.NewTheme(o.Screen, o.Color)
 	sc := &Screen{Title: o.Title, Model: o.Model(), Back: o.Back}
 	defer sc.wipe()
+	defer func() { // leaving stops a running proof and waits until its children are gone
+		if sc.stop != nil {
+			sc.stop()
+			<-sc.finished
+		}
+	}()
 	o.Screen.EnablePaste()
 	defer o.Screen.DisablePaste()
 	return tui.Loop{
@@ -282,10 +298,28 @@ func (sc *Screen) key(ev *tcell.EventKey, o Options) bool {
 		}
 		copy := sc.buf
 		sc.buf = nil
-		sc.mode = checking
+		sc.mode, sc.done, sc.total = checking, 0, 0
+		ctx, stop := context.WithCancel(context.Background())
+		finished := make(chan struct{})
+		sc.stop, sc.finished = stop, finished
+		pr := o.Prover
+		pr.Ctx = ctx
+		pr.Progress = func(done, total int) { // redraw only when the number changes
+			tui.Post(o.Screen, func() {
+				if sc.finished == finished {
+					sc.done, sc.total = done, total
+				}
+			})
+		}
 		go func() {
-			r := o.Prover.Prove(copy) // wipes copy
-			tui.Post(o.Screen, func() { sc.result, sc.mode = r, result })
+			defer close(finished)
+			r := pr.Prove(copy) // wipes copy
+			tui.Post(o.Screen, func() {
+				if sc.finished == finished {
+					sc.result, sc.mode, sc.stop = r, result, nil
+					stop()
+				}
+			})
 		}()
 	default:
 		return false

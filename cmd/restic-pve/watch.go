@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/norandom/restic-pve/internal/facts"
 	"github.com/norandom/restic-pve/internal/role"
 	"github.com/norandom/restic-pve/internal/watch"
 )
@@ -38,12 +39,12 @@ func cmdWatch(args []string, e env) int {
 		return 78
 	}
 	st := e.getenv(role.StateEnv)
-	dir := filepath.Join(st, "guests", "view")
+	dir := filepath.Join(st, facts.ViewDir)
 	line := func() {
 		var sp watch.LocalSpeed
 		lc := watch.LoadLocal(st)
 		sp.Add(lc.S)
-		fmt.Fprintln(e.stdout, watch.LineAll(watch.Load(dir), lc, &sp, time.Now(), hint))
+		fmt.Fprintln(e.stdout, watch.JobsLine(watch.Jobs(st), watch.Load(dir), lc, &sp, time.Now(), hint))
 	}
 	if *once || e.plain(false) {
 		line()

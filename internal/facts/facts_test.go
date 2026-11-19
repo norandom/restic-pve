@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,6 +64,7 @@ type machine struct {
 	t     *testing.T
 	state string
 	vars  map[string]string
+	mu    sync.Mutex // the storage is read by up to Parallel goroutines at once
 	calls []Call
 	// answers per program and first argument
 	answer func(Call) Result
@@ -86,7 +88,13 @@ func (m *machine) env() Env {
 	}
 	environ = append(environ, "PATH=/usr/bin", "RCLONE_CONFIG=/x/rclone.conf")
 	return Env{Getenv: func(k string) string { return m.vars[k] }, Environ: environ, Now: now, Version: "v9.9.9",
-		Run: func(c Call) Result { m.calls = append(m.calls, c); return m.answer(c) }}
+		Run: func(c Call) Result {
+			m.mu.Lock()
+			m.calls = append(m.calls, c)
+			answer := m.answer
+			m.mu.Unlock()
+			return answer(c)
+		}}
 }
 
 func write(t *testing.T, path, text string) {

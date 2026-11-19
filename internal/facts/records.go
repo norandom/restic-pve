@@ -88,6 +88,9 @@ type Job struct {
 	Exit    *int       `json:"exit"`
 	RunID   string     `json:"run_id"`
 	Running bool       `json:"-"` // its lock is held now
+	// Starting: a backup job that runs but has not begun reading yet (see Starting); set by
+	// Local, not by ReadJobs
+	Starting bool `json:"-"`
 }
 
 // NoResult is true for a job that ended without writing its end (killed, out of memory).

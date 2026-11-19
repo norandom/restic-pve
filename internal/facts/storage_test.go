@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,6 +85,8 @@ func TestStorageFacts(t *testing.T) {
 		"restic snapshots --json --no-lock -r rclone:drive:backups/sites" + rc,
 		"restic snapshots --json --no-lock -r rclone:drive:backups/proxmox" + rc,
 		"rclone about drive: --json"}
+	sort.Strings(argv) // read in parallel: the order of the calls is not fixed
+	sort.Strings(want)
 	if strings.Join(argv, "\n") != strings.Join(want, "\n") {
 		t.Errorf("calls:\n%s", strings.Join(argv, "\n"))
 	}

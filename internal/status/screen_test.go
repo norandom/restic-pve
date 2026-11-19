@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -158,7 +159,7 @@ func TestRun(t *testing.T) {
 	clock := now
 	o := Options{Screen: s, Title: "restic-pve v9.9.9 · backup machine · Status", Zone: "UTC", Poll: 5 * time.Millisecond,
 		Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return clock },
-		Read: func(refresh, cacheOnly bool) Model {
+		Read: func(_ context.Context, refresh, cacheOnly bool, _ func(Model, int, int)) Model {
 			mu.Lock()
 			reads = append(reads, map[bool]string{true: "refresh", false: "open"}[refresh]+map[bool]string{true: "+cache", false: ""}[cacheOnly])
 			mu.Unlock()
@@ -208,5 +209,101 @@ func TestRun(t *testing.T) {
 	o.Ready = nil
 	if _, err := Run(o, notSafeModel()); !errors.Is(err, tui.ErrIdle) {
 		t.Errorf("idle: %v", err)
+	}
+}
+
+// TestRunReading: while the storage is read the title bar counts the answers and the rows
+// fill in; other keys still work; q during the read returns at once and the read is stopped
+// before Run returns.
+func TestRunReading(t *testing.T) {
+	s := sim(t, 80, 24)
+	frames := make(chan string, 256)
+	step := make(chan int)
+	stopped := make(chan struct{})
+	o := Options{Screen: s, Title: "restic-pve v9.9.9 · backup machine · Status", Zone: "UTC", Poll: time.Hour,
+		Now: func() time.Time { return now },
+		Read: func(ctx context.Context, refresh, cacheOnly bool, progress func(Model, int, int)) Model {
+			if !refresh {
+				return notSafeModel() // the cache is fresh on open
+			}
+			for {
+				select {
+				case n := <-step:
+					m := notSafeModel()
+					m.F.Instances = m.F.Instances[:n]
+					progress(Build(m.F, "", now), n, 16)
+				case <-ctx.Done():
+					close(stopped)
+					return Model{}
+				}
+			}
+		},
+		Ready: func() {
+			select {
+			case frames <- strings.Join(text(s), "\n"):
+			default:
+			}
+		},
+	}
+	wait := func(want string) string {
+		t.Helper()
+		for {
+			select {
+			case f := <-frames:
+				if strings.Contains(f, want) {
+					return f
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no frame with %q", want)
+			}
+		}
+	}
+	done := make(chan string)
+	go func() {
+		next, _ := Run(o, Build(facts.Facts{Version: "v9.9.9"}, "", now))
+		done <- next
+	}()
+	wait("checked 12 min ago")
+	s.InjectKey(tcell.KeyRune, 'r', 0)
+	wait("reading the storage")
+	step <- 2
+	f := wait("reading the storage 2 of 16")
+	if !strings.Contains(f, "wiki") {
+		t.Errorf("the answered rows are not shown:\n%s", f)
+	}
+	s.InjectKey(tcell.KeyRune, '?', 0) // the screen stays usable
+	wait("Any key closes this box.")
+	s.InjectKey(tcell.KeyRune, 'x', 0)
+	step <- 5
+	wait("reading the storage 5 of 16")
+	start := time.Now()
+	s.InjectKey(tcell.KeyRune, 'q', 0)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("q during a read did not return")
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("Run returned before the read was stopped")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("q took %v", took)
+	}
+}
+
+// TestRunningGettingReady: a job that runs but has not begun reading says so in Now and next.
+func TestRunningGettingReady(t *testing.T) {
+	old := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = old })
+	m := notSafeModel()
+	m.F.Running[0].Starting = true
+	s := sim(t, 80, 24)
+	sc := &Screen{Title: "t", Model: m, Zone: "UTC"}
+	sc.Draw(s, retro.NewTheme(s, true))
+	if got := strings.Join(text(s), "\n"); !strings.Contains(got, "Running   guests since Thu 09:00 · getting ready") {
+		t.Errorf("running line:\n%s", got)
 	}
 }

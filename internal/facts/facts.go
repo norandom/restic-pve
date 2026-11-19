@@ -1,9 +1,11 @@
 package facts
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +24,12 @@ type Env struct {
 	// change, and shows the cached storage facts whatever their age.
 	CacheOnly bool
 	Version   string
+	// Ctx stops a storage read early (the screen was left); nil: it runs to its end.
+	Ctx context.Context
+	// Progress, when not nil, is told while the storage is read: first with done 0, then after
+	// each repository's answer, with the facts so far (the answered repositories, the cache
+	// or "not read yet" for the others). It is called from the goroutine that called Read.
+	Progress func(f Facts, done, total int)
 }
 
 // Facts is everything the status, keys and space screens show.
@@ -112,8 +120,41 @@ func Read(e Env) (Facts, error) {
 	case password == "":
 		f.Errors = append(f.Errors, FactError{"storage", (&MissingError{PasswordEnv}).Error()})
 	default:
-		read := ReadStorage(c, password, e.Environ, e.Run, e.Now)
-		if len(read.RepoErr) == 0 {
+		var progress func(Storage, int, int)
+		if e.Progress != nil {
+			recL, recG := records(state, &f)
+			progress = func(part Storage, done, total int) {
+				p := f
+				view := part
+				if hasCache { // the repositories not answered yet show what the cache knows
+					view.Repos = maps.Clone(cached.Repos)
+					maps.Copy(view.Repos, part.Repos)
+					view.About, view.CheckedAt = cached.About, cached.CheckedAt
+				}
+				view.RepoErr = map[string]string{}
+				for _, s := range Sources(c) {
+					_, answered := part.Repos[s]
+					if problem, bad := part.RepoErr[s]; bad {
+						view.RepoErr[s], answered = problem, true
+						delete(view.Repos, s)
+					}
+					if _, have := view.Repos[s]; !answered && !have {
+						view.RepoErr[s] = NotRead
+					}
+				}
+				p.CheckedAt, p.FromCache = time.Time{}, hasCache
+				if hasCache {
+					p.CheckedAt = cached.CheckedAt
+				}
+				p.Space.About, p.Space.AboutErr = view.About, ""
+				p.Instances, p.Space.GuestSize = instances(c, &view, recL, recG, e.Now)
+				e.Progress(p, done, total)
+			}
+		}
+		read := ReadStorage(e.Ctx, c, password, e.Environ, e.Run, e.Now, progress)
+		stopped := e.Ctx != nil && e.Ctx.Err() != nil
+		// only a complete read replaces the cache: every repository answered, none stopped
+		if len(read.RepoErr) == 0 && !stopped {
 			if err := SaveCache(state, read); err != nil {
 				f.Errors = append(f.Errors, FactError{"cache", err.Error()})
 			}
@@ -162,6 +203,7 @@ func Local(e Env, c Config) Facts {
 	sort.Slice(f.Space.Runs, func(a, b int) bool { return f.Space.Runs[a].Ended.Before(f.Space.Runs[b].Ended) })
 	for _, j := range ReadJobs(filepath.Join(state, JobsDir)) {
 		if j.Running {
+			j.Starting = Starting(state, j)
 			f.Running = append(f.Running, j)
 		} else {
 			f.LastJobs = append(f.LastJobs, j)

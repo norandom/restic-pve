@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -85,6 +86,54 @@ func (e env) facts(refresh, cacheOnly bool) facts.Env {
 		CacheOnly: cacheOnly, Version: version}
 }
 
+// plainRead reads the facts for a plain form. stdout gets nothing while the storage is read
+// (its lines are a contract); a terminal on stderr gets one progress line, erased at the end.
+func (e env) plainRead() (facts.Facts, error) {
+	defer stopOnSignal()()
+	fe := e.facts(false, false)
+	if line := e.progressLine("reading the storage"); line != nil {
+		fe.Progress = func(_ facts.Facts, done, total int) { line(done, total) }
+	}
+	return facts.Read(fe)
+}
+
+// progressLine is the counter "<what> 5 of 16" on stderr, rewritten in place and erased
+// after the last answer; nil when stderr is not a terminal.
+func (e env) progressLine(what string) func(done, total int) {
+	if !e.stderrTTY {
+		return nil
+	}
+	return func(done, total int) {
+		if done >= total {
+			fmt.Fprint(e.stderr, "\r\033[K")
+			return
+		}
+		fmt.Fprintf(e.stderr, "\r\033[K%s %d of %d", what, done, total)
+	}
+}
+
+// stopOnSignal ends a plain command on Ctrl-C, SIGTERM or SIGHUP: the restic and rclone
+// children run in process groups of their own, so they are killed here before the exit,
+// with the exit code of a shell for that signal. The returned func ends the watch.
+func stopOnSignal() func() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			facts.StopChildren()
+			fmt.Fprintln(os.Stderr, "\nrestic-pve: stopped; nothing was changed")
+			os.Exit(128 + int(sig.(syscall.Signal)))
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(done)
+	}
+}
+
 func title(screen string) string { return "restic-pve " + version + " · backup machine · " + screen }
 
 // fail prints the reason a command cannot work and returns its exit code: 78 for a missing
@@ -117,7 +166,7 @@ func cmdStatus(args []string, e env) int {
 		return fail(e, "status", err)
 	}
 	if e.plain(fl["plain"]) {
-		f, err := facts.Read(e.facts(false, false))
+		f, err := e.plainRead()
 		if err != nil {
 			return fail(e, "status", err)
 		}
@@ -171,6 +220,8 @@ func cmdKeys(args []string, e env) int {
 		fmt.Fprintln(e.stdout, err)
 		return 1
 	}
+	defer stopOnSignal()()
+	prover.Progress = e.progressLine("checking")
 	r := prover.Prove(copy) // wipes copy
 	fmt.Fprintln(e.stdout, r.Text)
 	if !r.OK {
@@ -224,7 +275,7 @@ func cmdSpace(args []string, e env) int {
 		return fail(e, "space", err)
 	}
 	if e.plain(fl["plain"]) {
-		f, err := facts.Read(e.facts(false, false))
+		f, err := e.plainRead()
 		if err != nil {
 			return fail(e, "space", err)
 		}
@@ -270,8 +321,18 @@ func (e env) screens(first string, m status.Model) int {
 	hint := e.getenv(facts.StartHintEnv)
 	code, idle := 0, false
 	last := m
-	readStatus := func(refresh, cacheOnly bool) status.Model {
-		f, err := facts.Read(e.facts(refresh, cacheOnly))
+	// last is written by the read of the status screen (in its goroutine) and read here after
+	// status.Run returned, which waits for that read: never at the same time
+	readStatus := func(ctx context.Context, refresh, cacheOnly bool, progress func(status.Model, int, int)) status.Model {
+		fe := e.facts(refresh, cacheOnly)
+		fe.Ctx = ctx
+		if progress != nil {
+			fe.Progress = func(f facts.Facts, done, total int) { progress(status.Build(f, hint, time.Now()), done, total) }
+		}
+		f, err := facts.Read(fe)
+		if ctx.Err() != nil {
+			return last // stopped: the partial read changes nothing
+		}
 		if err != nil {
 			last.F.Errors = append(last.F.Errors[:0:0], facts.FactError{What: "config", Text: err.Error()})
 			return last
@@ -294,8 +355,13 @@ func (e env) screens(first string, m status.Model) int {
 				Model:  func() keys.Model { m, _, _ := e.keysModel(); return m },
 				Prover: func() keys.Prover { _, p, _ := e.keysModel(); return p }()})
 		case "space":
-			readSpace := func(refresh, cacheOnly bool) (space.Model, string) {
-				f, err := facts.Read(e.facts(refresh, cacheOnly))
+			readSpace := func(ctx context.Context, refresh, cacheOnly bool, progress func(space.Model, int, int)) (space.Model, string) {
+				fe := e.facts(refresh, cacheOnly)
+				fe.Ctx = ctx
+				if progress != nil {
+					fe.Progress = func(f facts.Facts, done, total int) { progress(space.Build(f), done, total) }
+				}
+				f, err := facts.Read(fe)
 				if err != nil {
 					return space.Model{}, err.Error()
 				}
@@ -305,7 +371,7 @@ func (e env) screens(first string, m status.Model) int {
 				Read: readSpace, Stamp: e.stamp})
 		case "watch":
 			st := e.getenv(facts.StateEnv)
-			err = watch.Run(scr, watch.Options{Dir: filepath.Join(st, facts.GuestsDir, "view"), State: st, Color: color,
+			err = watch.Run(scr, watch.Options{Dir: filepath.Join(st, facts.ViewDir), State: st, Color: color,
 				Words: watch.Words{Title: title("watch"), Start: hint}})
 			if errors.Is(err, watch.ErrIdle) && back != "" {
 				err = nil // back to status, which has its own idle time
@@ -339,6 +405,7 @@ func restoreOnSignal(scr tcell.Screen) func() {
 	go func() {
 		select {
 		case <-sigs:
+			facts.StopChildren() // the readers' children are in groups of their own
 			scr.Fini()
 			fmt.Fprintln(os.Stderr, "restic-pve: stopped; nothing was changed")
 			os.Exit(1)

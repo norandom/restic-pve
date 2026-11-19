@@ -1,11 +1,15 @@
 package keys
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -173,13 +177,29 @@ func standInRestic(t *testing.T) (bin, log, codeFile string) {
 	bin, dir := t.TempDir(), t.TempDir()
 	log, codeFile = filepath.Join(dir, "log"), filepath.Join(dir, "code")
 	mk(t, codeFile, "0")
-	script := "#!/bin/sh\necho \"argv: $*\" >> " + log + "\n" +
-		"printf 'env: %s\\n' \"$(printf %s \"$RESTIC_PASSWORD\" | sha256sum | cut -c1-64)\" >> " + log + "\n" +
+	// one write per call: the proof runs up to three of these at once
+	script := "#!/bin/sh\nline=\"argv: $*\nenv: $(printf %s \"$RESTIC_PASSWORD\" | sha256sum | cut -c1-64)\"\n" +
+		"printf '%s\\n' \"$line\" >> " + log + "\n" +
 		"exit $(cat " + codeFile + ")\n"
 	if err := os.WriteFile(filepath.Join(bin, "restic"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return bin, log, codeFile
+}
+
+// entries are the two-line entries of the stand-in's log, sorted: parallel calls log in the
+// order they end.
+func entries(log string) string {
+	l := strings.Split(strings.TrimSuffix(log, "\n"), "\n")
+	var e []string
+	for i := 0; i+1 < len(l); i += 2 {
+		e = append(e, l[i]+"\n"+l[i+1])
+	}
+	if len(l)%2 != 0 {
+		e = append(e, "odd: "+l[len(l)-1])
+	}
+	sort.Strings(e)
+	return strings.Join(e, "\n")
 }
 
 // everything is the text of every file below the folders.
@@ -293,7 +313,7 @@ func TestProof(t *testing.T) {
 		"env: " + hex.EncodeToString(sum[:]) + "\n" +
 		"argv: cat config --no-lock -r rclone:drive:backups/proxmox -o rclone.program=rclone -o rclone.args=serve restic --stdio --tpslimit 8 --drive-chunk-size 64M --drive-use-trash=false --low-level-retries 20\n" +
 		"env: " + hex.EncodeToString(sum[:]) + "\n"
-	if string(lb) != wantLog {
+	if entries(string(lb)) != entries(wantLog) {
 		t.Errorf("restic log:\n%s", lb)
 	}
 	mu.Lock()
@@ -337,5 +357,90 @@ func TestReadHiddenRefusesAPipe(t *testing.T) {
 	defer w.Close()
 	if _, err := ReadHidden(int(r.Fd()), w); err != ErrNoTerminal || !strings.Contains(err.Error(), "not read from a pipe") {
 		t.Errorf("%v", err)
+	}
+}
+
+// TestProofParallel: the proof opens up to three repositories at a time and counts them; the
+// result is the one a proof one after the other gives, whatever the order of the answers; the
+// copy reaches each child through its environment only, and is wiped afterwards.
+func TestProofParallel(t *testing.T) {
+	m := newMachine(t)
+	var repos []string
+	for i := range 10 {
+		repos = append(repos, fmt.Sprintf("rclone:drive:backups/r%02d", i))
+	}
+	var mu sync.Mutex
+	var running, most int
+	var envs [][]string
+	var argv []string
+	code := map[string]int{}
+	run := func(c facts.Call) facts.Result {
+		mu.Lock()
+		running++
+		most = max(most, running)
+		// the entry points into the proof's own buffer, which is wiped at the end: look now
+		var env []string
+		for _, kv := range c.Env {
+			env = append(env, strings.Clone(kv))
+		}
+		envs = append(envs, env)
+		argv = append(argv, strings.Join(c.Args, " "))
+		repo := c.Args[4]
+		cd := code[repo]
+		mu.Unlock()
+		i, _ := strconv.Atoi(repo[len(repo)-2:])
+		time.Sleep(time.Duration((i*7)%10) * 3 * time.Millisecond)
+		mu.Lock()
+		running--
+		mu.Unlock()
+		return facts.Result{Code: cd}
+	}
+	var counts []int
+	p := Prover{State: m.state, InUse: password, Repos: repos, Environ: []string{"PATH=/usr/bin", "DISCORD_WEBHOOK_URL=" + webhook},
+		Run: run, Progress: func(done, total int) { counts = append(counts, done*100+total) }}
+	r := p.Prove([]byte(password))
+	if !r.OK || r.Text != "Your copy opens all 10 repositories. Proven today. Keep it in your password manager." {
+		t.Errorf("all open: %+v", r)
+	}
+	if most != facts.Parallel || len(counts) != 11 || counts[0] != 10 || counts[10] != 1010 {
+		t.Errorf("at once %d, counts %v", most, counts)
+	}
+	for i, env := range envs {
+		n := 0
+		for _, kv := range env {
+			if kv == facts.PasswordEnv+"="+password {
+				n++
+			}
+			noSecret(t, "a child env other than the password", strings.Replace(kv, facts.PasswordEnv+"="+password, "", 1))
+		}
+		if n != 1 {
+			t.Errorf("child %d has the copy %d times", i, n)
+		}
+	}
+	for _, a := range argv {
+		noSecret(t, "an argv", a)
+	}
+	// r04 has another password, r07 does not answer: the proof stops at r04, every time
+	os.Remove(filepath.Join(m.state, facts.MarkerFile))
+	code["rclone:drive:backups/r04"], code["rclone:drive:backups/r07"] = facts.ResticWrongPassword, 1
+	for range 10 {
+		r := p.Prove([]byte(password))
+		if r.OK || !strings.HasPrefix(r.Text, "Stop: The password in use does not open rclone:drive:backups/r04.") {
+			t.Fatalf("first failure: %+v", r)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(m.state, facts.MarkerFile)); err == nil {
+		t.Error("a failed proof wrote the marker")
+	}
+	// a stopped proof writes nothing
+	code = map[string]int{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.Ctx = ctx
+	if r := p.Prove([]byte(password)); r.OK || !strings.Contains(r.Text, "stopped") {
+		t.Errorf("stopped: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(m.state, facts.MarkerFile)); err == nil {
+		t.Error("a stopped proof wrote the marker")
 	}
 }

@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -190,11 +191,14 @@ func (sc *Screen) running() string {
 	f := sc.Model.F
 	var parts []string
 	for _, j := range f.Running {
+		p := j.Name + " since " + local(j.Started, "Mon 15:04")
 		if j.Started.IsZero() {
-			parts = append(parts, j.Name+" runs now")
-		} else {
-			parts = append(parts, j.Name+" since "+local(j.Started, "Mon 15:04"))
+			p = j.Name + " runs now"
 		}
+		if j.Starting {
+			p += " · getting ready"
+		}
+		parts = append(parts, p)
 	}
 	if len(parts) > 0 {
 		return strings.Join(parts, " · ")
@@ -293,8 +297,10 @@ type Options struct {
 	Color  bool
 	Title  string
 	Zone   string
-	// Read reads the facts: refresh reads the storage now; cacheOnly never reads it.
-	Read  func(refresh, cacheOnly bool) Model
+	// Read reads the facts: refresh reads the storage now; cacheOnly never reads it. ctx ends
+	// a storage read early; progress (nil: not wanted) is told the facts so far while the
+	// storage is read, from the goroutine that called Read.
+	Read  func(ctx context.Context, refresh, cacheOnly bool, progress func(m Model, done, total int)) Model
 	Stamp func() string // the local files the facts come from (tui.FileStamp)
 	Now   func() time.Time
 	Poll  time.Duration
@@ -311,14 +317,45 @@ func Run(o Options, first Model) (string, error) {
 	}
 	t := retro.NewTheme(o.Screen, o.Color)
 	sc := &Screen{Title: o.Title, Model: first, Zone: o.Zone, Busy: "reading…"}
+	// The storage is read in a goroutine; it hands each step back with Post, so sc is only
+	// touched on the loop. stop ends the read, finished is closed when it returned; leaving
+	// the screen stops it and waits, so no child outlives the screen.
 	reading := false
+	var stop context.CancelFunc = func() {}
+	finished := make(chan struct{})
+	close(finished)
 	read := func(refresh bool) {
 		reading = true
+		ctx, cancel := context.WithCancel(context.Background())
+		mine := make(chan struct{})
+		stop, finished = cancel, mine
+		progress := func(m Model, done, total int) {
+			tui.Post(o.Screen, func() {
+				if finished == mine && reading {
+					sc.Model = m
+					if total > 0 {
+						sc.Busy = fmt.Sprintf("reading the storage %d of %d", done, total)
+					}
+				}
+			})
+		}
 		go func() {
-			m := o.Read(refresh, false)
-			tui.Post(o.Screen, func() { sc.Model, sc.Busy, reading = m, "", false })
+			defer close(mine)
+			m := o.Read(ctx, refresh, false, progress)
+			if ctx.Err() != nil {
+				return // left: the partial read is dropped
+			}
+			tui.Post(o.Screen, func() {
+				if finished == mine {
+					sc.Model, sc.Busy, reading = m, "", false
+				}
+			})
 		}()
 	}
+	defer func() {
+		stop()
+		<-finished
+	}()
 	read(false)
 	next := ""
 	err := tui.Loop{
@@ -369,7 +406,7 @@ func Run(o Options, first Model) (string, error) {
 		},
 		Changed: func() {
 			if !reading {
-				sc.Model = o.Read(false, true)
+				sc.Model = o.Read(context.Background(), false, true, nil)
 			}
 		},
 	}.Run()

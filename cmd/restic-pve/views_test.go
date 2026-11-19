@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ alias = "web"
 type viewMachine struct {
 	t     *testing.T
 	vars  map[string]string
+	mu    sync.Mutex // the storage is read by up to three goroutines at once
 	calls []facts.Call
 	snaps string // the JSON restic gives for every repository
 	about string
@@ -75,6 +77,8 @@ func (m *viewMachine) env(out, errb *bytes.Buffer) env {
 		return append(l, "PATH=/usr/bin")
 	}
 	e.runner = func(c facts.Call) facts.Result {
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		m.calls = append(m.calls, c)
 		if c.Name == "rclone" {
 			return facts.Result{Stdout: []byte(m.about)}

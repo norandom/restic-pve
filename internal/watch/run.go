@@ -7,12 +7,16 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/norandom/restic-pve/internal/facts"
 	"github.com/norandom/restic-pve/internal/stream/blockmap"
 	"github.com/norandom/restic-pve/retro"
 )
 
 // Poll is how often the viewer reads the state file.
 const Poll = 250 * time.Millisecond
+
+// JobsPoll is how often the viewer reads the job records and probes their locks.
+const JobsPoll = 2 * time.Second
 
 // Idle is how long the viewer stays open without a running backup before it closes itself.
 // A viewer whose terminal went away (a dropped ssh session) must not run for days.
@@ -59,6 +63,9 @@ func Run(screen tcell.Screen, o Options) error {
 	var watched time.Time // start of the run this viewer saw running
 	lastActive := o.Now() // last time a backup was seen running
 	var lastKey string    // what the last drawn frame showed
+	// the backup jobs that run, read at most every JobsPoll: each read probes their locks
+	var jobs []facts.Job
+	var jobsRead time.Time
 	// draw reads the state and redraws only when something visible changed: an idle viewer
 	// must not send the same screen four times a second. force redraws regardless (resize).
 	draw := func(force bool) {
@@ -66,6 +73,13 @@ func Run(screen tcell.Screen, o Options) error {
 		lc := LoadLocal(o.State)
 		lsp.Add(lc.S)
 		now := o.Now()
+		if jobsRead.IsZero() || now.Sub(jobsRead) >= JobsPoll || force {
+			jobs, jobsRead = Jobs(o.State), now
+		}
+		starting := firstStarting(jobs)
+		if len(jobs) > 0 {
+			lastActive = now // a backup job runs: never close by itself
+		}
 		key := "none"
 		if lc.S != nil {
 			key = fmt.Sprint("local", lc.Running, lc.S.RunStatus, lc.S.Updated, lc.S.CurrentUnit)
@@ -85,7 +99,10 @@ func Run(screen tcell.Screen, o Options) error {
 		}
 		cols, rows := screen.Size()
 		// notices that depend on the clock (stopped updating, waiting) refresh every 5 s
-		key = fmt.Sprint(key, cols, rows, now.Unix()/5)
+		key = fmt.Sprint(key, cols, rows, now.Unix()/5, len(jobs))
+		if starting != nil {
+			key = fmt.Sprint(key, "starting", starting.Name, StartingLine(*starting, now), since(*starting, now))
+		}
 		if !force && key == lastKey {
 			if o.Ready != nil {
 				o.Ready()
@@ -98,6 +115,15 @@ func Run(screen tcell.Screen, o Options) error {
 		switch {
 		case !guestRunning && lc.Running:
 			f = BuildLocal(lc, &lsp, now, o.Words)
+		case starting != nil && !guestRunning:
+			f = BuildStarting(*starting, now, o.Words)
+		case len(jobs) > 0 && f.Notice != nil && f.Notice.Heading == "No backup running":
+			// a job holds its lock: never "no backup is running"
+			last := ""
+			if _, l, ok := strings.Cut(Line(snap, now, o.Words.Start), "; "); ok && strings.HasPrefix(l, "the last one") {
+				last = l
+			}
+			f = betweenSteps(jobs[0], now, o.Words, last)
 		case f.Notice != nil && lc.S != nil && !guestRunning && f.Notice.Heading == "No backup running":
 			// what the local sources did last, before the start hint
 			n := *f.Notice
@@ -105,7 +131,7 @@ func Run(screen tcell.Screen, o Options) error {
 			f.Notice = &n
 		}
 		if cols < 60 || rows < 20 {
-			small(screen, t, LineAll(snap, lc, &lsp, now, o.Words.Start))
+			small(screen, t, JobsLine(jobs, snap, lc, &lsp, now, o.Words.Start))
 		} else {
 			f.Draw(screen, t)
 		}

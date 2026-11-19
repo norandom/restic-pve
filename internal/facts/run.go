@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -20,6 +22,8 @@ type Call struct {
 	Args    []string      // never a secret
 	Env     []string      // the program's whole environment
 	Timeout time.Duration // every call has one
+	// Ctx stops the call early: the screen was left. nil: only the time-out stops it.
+	Ctx context.Context
 }
 
 // Result is what a program did. Err is set when it could not run to its end: not found, not
@@ -36,6 +40,36 @@ type Runner func(Call) Result
 
 // ErrTimeout is the error of a call that ran out of time.
 var ErrTimeout = errors.New("did not answer in time")
+
+// ErrStopped is the error of a call that was stopped because the screen was left, or one
+// that was not started because the tool is ending.
+var ErrStopped = errors.New("was stopped")
+
+// children are the process groups of the programs that run now. StopChildren kills them
+// all when the tool ends on a signal; after it, no program starts.
+var children = struct {
+	sync.Mutex
+	pgids   map[int]bool
+	stopped bool
+}{pgids: map[int]bool{}}
+
+// StopChildren kills every program that runs now, with its own children, and refuses to
+// start another. The tool calls it right before it exits on a signal.
+func StopChildren() {
+	children.Lock()
+	defer children.Unlock()
+	children.stopped = true
+	for pg := range children.pgids {
+		_ = unix.Kill(-pg, unix.SIGKILL)
+	}
+}
+
+// Running is the number of programs that run now (tests).
+func Running() int {
+	children.Lock()
+	defer children.Unlock()
+	return len(children.pgids)
+}
 
 // Exec runs programs at the lowest CPU priority (nice 19) and the idle I/O class, so that
 // reading the storage never slows a backup down. Both settings are made on a thread of its
@@ -55,17 +89,44 @@ func Exec(c Call) Result {
 }
 
 func execLocked(c Call) Result {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	parent := c.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, c.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Env = c.Env
+	// a process group of its own: a stop or a time-out kills the program and whatever it
+	// started, so nothing of it outlives the screen
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return unix.Kill(-cmd.Process.Pid, unix.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	err := cmd.Run()
+	children.Lock()
+	if children.stopped || parent.Err() != nil {
+		children.Unlock()
+		return Result{Err: ErrStopped}
+	}
+	err := cmd.Start()
+	pid := 0
+	if err == nil {
+		pid = cmd.Process.Pid
+		children.pgids[pid] = true
+	}
+	children.Unlock()
+	if err == nil {
+		err = cmd.Wait()
+		children.Lock()
+		delete(children.pgids, pid)
+		children.Unlock()
+	}
 	r := Result{Stdout: out.Bytes(), Stderr: errb.Bytes()}
 	var ee *exec.ExitError
 	switch {
+	case parent.Err() != nil:
+		r.Err = ErrStopped
 	case ctx.Err() != nil:
 		r.Err = ErrTimeout
 	case errors.As(err, &ee):
@@ -82,8 +143,8 @@ func (r Result) Problem(name string) string {
 	switch {
 	case errors.As(r.Err, &nf) || errors.Is(r.Err, exec.ErrNotFound):
 		return fmt.Sprintf("%s is not installed here (not found in PATH); the backup machine's image has it, run this command there", name)
-	case errors.Is(r.Err, ErrTimeout):
-		return fmt.Sprintf("%s %s", name, ErrTimeout.Error())
+	case errors.Is(r.Err, ErrTimeout), errors.Is(r.Err, ErrStopped):
+		return fmt.Sprintf("%s %s", name, r.Err.Error())
 	case r.Err != nil:
 		return fmt.Sprintf("%s could not be started: %v", name, r.Err)
 	case r.Code != 0:

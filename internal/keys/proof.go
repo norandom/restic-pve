@@ -1,12 +1,14 @@
 package keys
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/norandom/restic-pve/internal/facts"
@@ -37,6 +39,11 @@ type Prover struct {
 	Repos   []string // the repositories of backup.toml
 	Environ []string
 	Run     facts.Runner
+	// Ctx stops the proof (the screen was left); nil: it runs to its end.
+	Ctx context.Context
+	// Progress, when not nil, is told how many repositories answered: first 0, then after
+	// each answer; it is called from the goroutine that called Prove.
+	Progress func(done, total int)
 }
 
 // Prove checks copy and wipes it before it returns, whatever the result. The copy reaches
@@ -66,21 +73,73 @@ func (p Prover) Prove(copy []byte) Result {
 	entry = append(append(entry, facts.PasswordEnv+"="...), copy...)
 	defer clear(entry)
 	env := append(facts.ChildEnv(p.Environ), unsafe.String(&entry[0], len(entry)))
-	opened := 0
-	for _, repo := range p.Repos {
-		r := p.Run(facts.Call{Name: "restic", Args: facts.ResticArgs(repo, "cat", "config"), Env: env, Timeout: facts.CatConfigTimeout})
-		switch {
-		case r.Err == nil && r.Code == facts.ResticWrongPassword:
-			return Result{Text: "Stop: " + facts.WrongPasswordText(repo) + " Nothing was written."}
-		case r.Err == nil && r.Code == 10:
-			continue // no backup there yet: nothing to open
-		case r.Err != nil || r.Code != 0:
-			return Result{Text: fmt.Sprintf("The proof could not open %s: %s. Nothing was written; try again when the storage answers.",
-				repo, r.Problem("restic"))}
-		}
-		opened++
+	// Up to facts.Parallel repositories are opened at a time, in the order of backup.toml.
+	// The result is the one a proof one after the other gives: the first repository (in that
+	// order) that cannot be opened stops the proof. After a failure no repository behind it
+	// starts; the ones before it were all started already, so the first failure is known.
+	type answer struct {
+		problem string // "": opened or no backup there yet
+		opened  bool
 	}
+	answers := make([]answer, len(p.Repos))
+	var failed atomic.Int64 // the lowest index that failed, plus one; 0: none yet
+	fail := func(i int) {
+		for {
+			f := failed.Load()
+			if f != 0 && f <= int64(i)+1 || failed.CompareAndSwap(f, int64(i)+1) {
+				return
+			}
+		}
+	}
+	ctx := p.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if p.Progress != nil {
+		p.Progress(0, len(p.Repos))
+	}
+	answered := 0
+	facts.Each(len(p.Repos),
+		func(i int) bool { f := failed.Load(); return ctx.Err() != nil || f != 0 && int64(i)+1 > f },
+		func(i int) {
+			repo := p.Repos[i]
+			r := p.Run(facts.Call{Name: "restic", Args: facts.ResticArgs(repo, "cat", "config"), Env: env,
+				Timeout: facts.CatConfigTimeout, Ctx: ctx})
+			a := &answers[i]
+			switch {
+			case r.Err == nil && r.Code == facts.ResticWrongPassword:
+				a.problem = "Stop: " + facts.WrongPasswordText(repo) + " Nothing was written."
+			case r.Err == nil && r.Code == 10:
+				// no backup there yet: nothing to open
+			case r.Err != nil || r.Code != 0:
+				a.problem = fmt.Sprintf("The proof could not open %s: %s. Nothing was written; try again when the storage answers.",
+					repo, r.Problem("restic"))
+			default:
+				a.opened = true
+			}
+			if a.problem != "" {
+				fail(i)
+			}
+		},
+		func(int, bool) {
+			answered++
+			if p.Progress != nil {
+				p.Progress(answered, len(p.Repos))
+			}
+		})
 	env = nil
+	if ctx.Err() != nil {
+		return Result{Text: "The proof was stopped. Nothing was written."}
+	}
+	opened := 0
+	for _, a := range answers {
+		if a.problem != "" {
+			return Result{Text: a.problem}
+		}
+		if a.opened {
+			opened++
+		}
+	}
 	if err := writeMarker(p.State, facts.Fingerprint(copy)); err != nil {
 		return Result{Text: "Your copy is right, but the proof date could not be saved: " + err.Error() + "."}
 	}

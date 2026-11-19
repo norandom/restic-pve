@@ -55,6 +55,12 @@ storage again, `?` shows the help.
 In scripts, `restic-pve status --plain` prints one fact per line and exits 0 when every source
 and guest is safe, 1 when one is not or is not known.
 
+The storage is asked at most every six hours, or when you press `r`. It reads three repositories
+at a time at the lowest priority. The title bar counts the answers, for example
+`reading the storage 5 of 16`, while the last known values stay on screen. Leaving the screen
+stops the read, and only a complete read is remembered. While a backup runs, the remembered
+answers are shown and the read waits.
+
 ## Which keys matter, and is my password copy right?
 
 ```sh
@@ -113,5 +119,12 @@ At the end the run is solid and the status box says how long it took; restic the
 snapshot. For a local source (files, not a guest) watch shows its progress instead. When nothing
 runs, it names the command that starts a backup. It closes itself ten minutes after the last
 running backup. `restic-pve watch --once` prints one line instead.
+
+A backup that has started but has not begun reading shows "getting ready" with the time since
+its start. Without a terminal the line is
+`starting: <job> job began 40s ago; reading has not begun yet`. A guest backup spends a minute or
+two there, checking the guest on the Proxmox host. After ten minutes the screen says that this is
+longer than usual and where to look. The status screen marks such a job with `getting ready` on
+its Running line.
 
 [Back to the index](README.md)

@@ -1,11 +1,15 @@
 package facts
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,42 +78,156 @@ func WrongPasswordText(repo string) string {
 		"into .env (RESTIC_PASSWORD=...); never make a new password for existing backups."
 }
 
-// ReadStorage lists the snapshots of every repository and asks rclone how full the storage
-// is. Programs run one after the other through run, never in parallel.
-func ReadStorage(c Config, password string, environ []string, run Runner, now time.Time) Storage {
-	st := Storage{CheckedAt: now, Repos: map[string][]Snap{}, RepoErr: map[string]string{}}
-	env := append(ChildEnv(environ), PasswordEnv+"="+password)
+// Parallel is how many repositories are read at the same time. Each read is one restic and
+// one rclone child; three keep a read of many repositories short without loading the host.
+const Parallel = 3
+
+// Stopped is the problem of a repository whose read was stopped because the screen was left.
+const Stopped = "the read was stopped"
+
+// Sources are the source names of c in the order of backup.toml: local sources, then the
+// Proxmox hosts. Every storage read and every list follows this order.
+func Sources(c Config) []string {
 	sources := append([]string{}, c.Files...)
 	for _, p := range c.Proxmox {
 		sources = append(sources, p.Name)
 	}
-	for _, s := range sources {
-		repo := c.Repository(s)
-		r := run(Call{Name: "restic", Args: ResticArgs(repo, "snapshots", "--json"), Env: env, Timeout: SnapshotsTimeout})
-		switch {
-		case r.Err == nil && r.Code == resticNoRepo:
-			st.Repos[s] = nil // no backup made yet
-		case r.Err == nil && r.Code == ResticWrongPassword:
-			st.RepoErr[s] = WrongPasswordText(repo)
-			if st.WrongPassword == "" {
-				st.WrongPassword = repo
-			}
-		case r.Err != nil || r.Code != 0:
-			st.RepoErr[s] = r.Problem("restic")
-		default:
-			snaps, err := parseSnapshots(r.Stdout)
-			if err != nil {
-				st.RepoErr[s] = "restic gave a snapshot list that cannot be read: " + err.Error()
+	return sources
+}
+
+// Each runs do(i) for i in 0..n-1, at most Parallel at a time, in the order of i, in
+// goroutines of its own. Before it starts do(i), skip(i) decides whether to leave i out
+// (nil: none is left out); a left-out i is not started. done(i) is called for every i that
+// was started or left out, one at a time and only from the goroutine that called Each, in
+// the order the answers arrive. Each returns when every started do has returned.
+func Each(n int, skip func(i int) bool, do func(i int), done func(i int, skipped bool)) {
+	type answer struct {
+		i       int
+		skipped bool
+	}
+	answers := make(chan answer)
+	slots := make(chan struct{}, Parallel)
+	go func() {
+		for i := range n {
+			slots <- struct{}{} // wait for a free slot, then decide: skip sees the newest answers
+			if skip != nil && skip(i) {
+				<-slots
+				answers <- answer{i, true}
 				continue
 			}
-			st.Repos[s] = snaps
+			go func() {
+				do(i)
+				<-slots
+				answers <- answer{i, false}
+			}()
 		}
-		if r.Err != nil && st.RepoErr[s] != "" && strings.Contains(st.RepoErr[s], "not installed") {
-			break // the same for every repository
+	}()
+	for range n {
+		a := <-answers
+		done(a.i, a.skipped)
+	}
+}
+
+// ReadStorage lists the snapshots of every repository and asks rclone how full the storage
+// is. Up to Parallel repositories are read at a time, and rclone about runs alongside; each
+// child at nice 19 and idle I/O (Exec). A slow or failing repository does not hold up or fail
+// the others; its problem is in RepoErr. The result does not depend on the order in which the
+// answers arrive. progress, when not nil, is called first with done 0, then after each
+// repository's answer with the read so far (a copy the receiver may keep); it is called only
+// from the goroutine that called ReadStorage. When ctx ends, running children are killed,
+// no new one starts, and every repository not read has the problem Stopped.
+func ReadStorage(ctx context.Context, c Config, password string, environ []string, run Runner, now time.Time,
+	progress func(st Storage, done, total int)) Storage {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	st := Storage{CheckedAt: now, Repos: map[string][]Snap{}, RepoErr: map[string]string{}}
+	env := append(ChildEnv(environ), PasswordEnv+"="+password)
+	sources := Sources(c)
+	aboutDone := make(chan struct{})
+	var about *About
+	var aboutErr string
+	go func() {
+		defer close(aboutDone)
+		about, aboutErr = readAbout(ctx, c.Base, environ, run)
+	}()
+
+	// one answer per repository, written by its own goroutine into its own element, read by
+	// this goroutine only after done(i) (the channel in Each orders the two)
+	type answer struct {
+		snaps   []Snap
+		known   bool // snaps holds the answer (nil: no repository there yet)
+		problem string
+		wrongPw bool
+	}
+	answers := make([]answer, len(sources))
+	// missing is the problem "restic is not installed" once a child found it: set by a worker,
+	// read by Each's dispatcher and by this goroutine, hence atomic
+	var missing atomic.Pointer[string]
+	if progress != nil {
+		progress(st.copy(), 0, len(sources))
+	}
+	n := 0
+	Each(len(sources),
+		func(int) bool { return ctx.Err() != nil || missing.Load() != nil },
+		func(i int) {
+			repo := c.Repository(sources[i])
+			r := run(Call{Name: "restic", Args: ResticArgs(repo, "snapshots", "--json"), Env: env, Timeout: SnapshotsTimeout, Ctx: ctx})
+			a := &answers[i]
+			switch {
+			case r.Err == nil && r.Code == resticNoRepo:
+				a.known = true // no backup made yet
+			case r.Err == nil && r.Code == ResticWrongPassword:
+				a.problem, a.wrongPw = WrongPasswordText(repo), true
+			case errors.Is(r.Err, ErrStopped):
+				a.problem = Stopped
+			case r.Err != nil || r.Code != 0:
+				a.problem = r.Problem("restic")
+				if r.Err != nil && strings.Contains(a.problem, "not installed") {
+					p := a.problem
+					missing.CompareAndSwap(nil, &p)
+				}
+			default:
+				snaps, err := parseSnapshots(r.Stdout)
+				if err != nil {
+					a.problem = "restic gave a snapshot list that cannot be read: " + err.Error()
+				} else {
+					a.snaps, a.known = snaps, true
+				}
+			}
+		},
+		func(i int, skipped bool) {
+			s, a := sources[i], answers[i]
+			switch {
+			case skipped && missing.Load() != nil:
+				st.RepoErr[s] = *missing.Load()
+			case skipped:
+				st.RepoErr[s] = Stopped
+			case a.known:
+				st.Repos[s] = a.snaps
+			default:
+				st.RepoErr[s] = a.problem
+			}
+			n++
+			if progress != nil {
+				progress(st.copy(), n, len(sources))
+			}
+		})
+	for i, s := range sources { // the first repository of backup.toml the password does not open
+		if answers[i].wrongPw && st.WrongPassword == "" {
+			st.WrongPassword = c.Repository(s)
 		}
 	}
-	st.About, st.AboutErr = ReadAbout(c.Base, environ, run)
+	<-aboutDone
+	st.About, st.AboutErr = about, aboutErr
 	return st
+}
+
+// copy is st with maps of its own, for a progress receiver.
+func (st Storage) copy() Storage {
+	c := st
+	c.Repos, c.RepoErr = maps.Clone(st.Repos), maps.Clone(st.RepoErr)
+	return c
 }
 
 func parseSnapshots(b []byte) ([]Snap, error) {
@@ -146,11 +264,15 @@ func parseSnapshots(b []byte) ([]Snap, error) {
 // (nil, ""); a remote that cannot answer gives nil and the reason. The child gets no
 // repository password.
 func ReadAbout(base string, environ []string, run Runner) (*About, string) {
+	return readAbout(context.Background(), base, environ, run)
+}
+
+func readAbout(ctx context.Context, base string, environ []string, run Runner) (*About, string) {
 	remote := Remote(base)
 	if remote == "" {
 		return nil, ""
 	}
-	r := run(Call{Name: "rclone", Args: []string{"about", remote + ":", "--json"}, Env: ChildEnv(environ), Timeout: AboutTimeout})
+	r := run(Call{Name: "rclone", Args: []string{"about", remote + ":", "--json"}, Env: ChildEnv(environ), Timeout: AboutTimeout, Ctx: ctx})
 	if p := r.Problem("rclone"); p != "" {
 		return nil, p
 	}
