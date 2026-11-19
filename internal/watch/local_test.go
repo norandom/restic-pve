@@ -75,7 +75,7 @@ func TestLocalRunning(t *testing.T) {
 	th := retro.NewTheme(scr, true)
 	BuildLocal(lc, &sp, now, words).Draw(scr, th)
 	l := lines(scr)
-	want(t, l, "restic-pve v9.9.9 · backup machine · watch", "q=Quit", " Backing up sites ",
+	want(t, l, "restic-pve v9.9.9 · backup machine · watch", "q=Leave view", " Backing up sites ",
 		"Source    sites (unit sites/blog)", "Read      4.9 GiB of 12.0 GiB (35%)", "Elapsed   00:12:31",
 		"Speed     31 MiB/s over the last 30 s", "New data  shown when this source ends", "Finished  new data wiki +120 MiB",
 		"Reading...", "q leaves the view, the backup goes on")

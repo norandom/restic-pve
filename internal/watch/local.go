@@ -141,7 +141,7 @@ func (ls LocalScreen) Draw(screen tcell.Screen, t retro.Theme) {
 func BuildLocal(lc Local, sp *LocalSpeed, now time.Time, w Words) Frame {
 	s := lc.S
 	unit := s.CurrentUnit
-	ls := LocalScreen{Title: w.Title, Key: "q=Quit", Percent: -1, Brand: Brand, Msg: "Reading..."}
+	ls := LocalScreen{Title: w.Title, Key: "q=Leave view", Percent: -1, Brand: Brand, Msg: "Reading..."}
 	if unit == "" {
 		ls.Heading = "Local backup"
 		ls.Lines = append(ls.Lines, [2]string{"Source", "between two sources (step: " + orDash(s.Step) + ")"})

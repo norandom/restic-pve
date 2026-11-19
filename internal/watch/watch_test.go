@@ -98,7 +98,7 @@ func mapCells(l []string) map[rune]int {
 func TestRunning(t *testing.T) {
 	s := state()
 	l := draw(t, Snapshot{Live: s}, true, s.Updated)
-	want(t, l, " Guest 100 (web) · full backup · 16.0 GiB disk", "q=Quit", "Block 100", "22%",
+	want(t, l, " Guest 100 (web) · full backup · 16.0 GiB disk", "q=Leave view", "Block 100", "22%",
 		"Elapsed Time: 00:01:23", "Full backup", "· - Not read yet", "Guest 100:  1 block = 12 MiB",
 		"Writing...  ", "q leaves the view, the backup goes on")
 	// the run: 100 handed cells; then W at its end, r on the cell being read

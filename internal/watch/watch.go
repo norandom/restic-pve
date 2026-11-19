@@ -189,7 +189,7 @@ func (f Frame) Draw(screen tcell.Screen, t retro.Theme) {
 }
 
 func (w Words) notice(heading string, msg string, lines ...string) Frame {
-	return Frame{Notice: &blockview.Notice{Title: w.Title, Key: "q=Quit",
+	return Frame{Notice: &blockview.Notice{Title: w.Title, Key: "q=Leave view",
 		Heading: heading, Lines: lines, Msg: msg, Brand: "restic-pve"}}
 }
 
@@ -238,7 +238,7 @@ func Build(snap Snapshot, sp *Speed, watched bool, now time.Time, cols, rows int
 	blockBytes := float64(s.Disk) / float64(len(s.Map)) * float64(k)
 	f := blockview.Screen{
 		Title:   guestName(s) + " · full backup · " + Size(float64(s.Disk)) + " disk",
-		Key:     "q=Quit",
+		Key:     "q=Leave view",
 		Cells:   cells,
 		Block:   run,
 		Percent: percent(s),
