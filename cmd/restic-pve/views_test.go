@@ -295,3 +295,35 @@ func TestStatusScreenCode(t *testing.T) {
 	}
 	m.noSecret(out.String(), errb.String())
 }
+
+// TestPlainChoiceWithUnknownSize: a terminal that reports 0 x 0 (a new container, before the
+// size arrives) is not "too small". The screen opens when the size arrives or stays unknown;
+// a really small terminal still gets plain lines.
+func TestPlainChoiceWithUnknownSize(t *testing.T) {
+	base := env{tty: true, getenv: func(string) string { return "" }, newScreen: terminalScreen}
+	calls := 0
+	late := base
+	late.size = func() (int, int, error) {
+		calls++
+		if calls < 4 {
+			return 0, 0, nil
+		}
+		return 100, 30, nil
+	}
+	if late.plain(false) {
+		t.Error("a size that arrives late gave plain lines")
+	}
+	never := base
+	never.size = func() (int, int, error) { return 0, 0, nil }
+	if never.plain(false) {
+		t.Error("an unknown size gave plain lines")
+	}
+	small := base
+	small.size = func() (int, int, error) { return 59, 30, nil }
+	if !small.plain(false) {
+		t.Error("a small terminal did not give plain lines")
+	}
+	if !base.plain(true) {
+		t.Error("--plain did not give plain lines")
+	}
+}

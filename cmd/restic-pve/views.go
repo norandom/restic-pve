@@ -61,7 +61,15 @@ func (e env) plain(flag bool) bool {
 		return true
 	}
 	if e.size != nil {
-		if c, r, err := e.size(); err == nil && tui.Small(c, r) {
+		c, r, err := e.size()
+		// A terminal handed to a new container reports 0 x 0 for a moment, until the size
+		// arrives. That is "not known yet", not "too small": wait up to a second for it, and
+		// if it never comes, open the screen (it adapts when the size arrives).
+		for i := 0; err == nil && (c == 0 || r == 0) && i < 20; i++ {
+			time.Sleep(50 * time.Millisecond)
+			c, r, err = e.size()
+		}
+		if err == nil && c > 0 && r > 0 && tui.Small(c, r) {
 			return true
 		}
 	}
