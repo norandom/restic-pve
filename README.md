@@ -18,6 +18,18 @@ This repository holds the tool, its tests, the release workflow and the releases
 machine's control code and its configuration stay on that machine; `request` below is the
 interface between the two machines, and `stream` is what the backup machine runs for each guest.
 
+## Screens
+
+The screens of the backup machine, in the retro look the whole tool uses. Captured from a terminal
+with made-up names.
+
+| | |
+|---|---|
+| ![Status: every source and guest has a recent copy away from the site](docs/img/status-ok.png) | ![Status with a warning: one source is too old, and the line at the bottom says what to do](docs/img/status-warning.png) |
+| **Status.** Is there a recent copy away from the site, have I seen a restore work, what runs now and next. | **Status with a warning.** The bottom line names the problem and the command that fixes it. |
+| ![Keys: the admin's keys, what each does and what losing it means](docs/img/keys.png) | ![Password check: a wrong copy is refused without showing what was pasted](docs/img/keys-proof-wrong.png) |
+| **Keys.** Every key by presence only. One needs a copy away from the machine. | **Password check.** Paste your copy; it is never shown. Here a wrong one is refused. |
+
 ## Roles
 
 The tool knows which machine it runs on:
