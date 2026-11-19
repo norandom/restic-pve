@@ -58,7 +58,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		sys := install.Default(version, exe)
 		sys.Plain = len(args) == 2
 		return sys.Install()
-	case args[0] == "demo" && demoArgs(args[1:]):
+	case args[0] == "demo":
+		if !demoArgs(args[1:]) { // a mistyped mode gets the demo's own usage, not the general one
+			fmt.Fprintln(stderr, "usage: restic-pve demo [pack] [full|incremental]")
+			return 64
+		}
 		if err := demo.Main(args[1:], os.Getenv); err != nil {
 			fmt.Fprintf(stderr, "restic-pve demo: %v\n", err)
 			return 1

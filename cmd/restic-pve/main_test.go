@@ -17,6 +17,12 @@ func TestDispatch(t *testing.T) {
 			t.Errorf("%q: %d %q", args, code, errb.String())
 		}
 	}
+	// a mistyped demo mode names the demo's modes
+	errb.Reset()
+	if code := run([]string{"demo", "incremential"}, &out, &errb); code != 64 ||
+		errb.String() != "usage: restic-pve demo [pack] [full|incremental]\n" {
+		t.Errorf("mistyped demo mode: %d %q", code, errb.String())
+	}
 	// the demo is not in the usage line and needs a terminal
 	errb.Reset()
 	if code := run([]string{"demo"}, &out, &errb); code != 1 || errb.String() != "restic-pve demo: the demo needs a terminal\n" {
