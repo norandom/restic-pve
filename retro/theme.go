@@ -1,6 +1,6 @@
 // Package retro is the house style of the project's full-screen views: a retro disk-tool look
 // with a blue screen, white text, yellow titles and highlight, thin single-line boxes, a grey
-// title bar on top and a grey message bar at the bottom. docs/house-style.md describes it.
+// title bar on top and a grey message bar at the bottom. docs/reference/house-style.md describes it.
 //
 // The package draws on a tcell screen and builds on tview primitives. It knows nothing about
 // installing or backing up; programs give it texts and states.

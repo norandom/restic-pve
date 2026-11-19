@@ -1,32 +1,34 @@
 # Releases and signing
 
-This page is for the maintainer, the person who publishes new versions of this tool. An admin who
-installs and runs `restic-pve` needs none of it and never holds the release signing key; the
-installed binary only carries the public half.
+For the maintainer, the person who publishes new versions of this tool. An admin who installs
+and runs `restic-pve` needs none of this and never holds the release signing key; the installed
+binary carries only the public half.
 
 A release is built by GitHub Actions and published only after the repository owner approves it.
 `restic-pve update` accepts a release only when its checksums are signed with an Ed25519 key that
 is built into the installed binary. The private key exists in two places: the GitHub environment
-`release` of this repository and the owner's password manager.
+`release` of this repository, and the owner's password manager.
 
 ## What a release contains
 
 `restic-pve-linux-amd64`, `VERSION` (the tag), `SHA256SUMS` (SHA-256 of the binary and of
-`VERSION`) and `SHA256SUMS.sig` (Ed25519 signature over `SHA256SUMS`).
+`VERSION`) and `SHA256SUMS.sig` (the Ed25519 signature over `SHA256SUMS`). The formats are in
+[reference/release-assets.md](reference/release-assets.md).
 
 ## How a release is made
 
 1. Push a tag: `git tag v1.2.3 && git push origin v1.2.3`.
-2. Job `build` (no secret): gofmt of `cmd` and `internal`, `go vet`, `go test`, builds the binary from
-   the vendored sources in the pinned Go image,
-   writes `VERSION` and `SHA256SUMS`.
-3. Job `publish` waits for the approval of the required reviewer of the environment `release`.
+2. The job `build` sees no secret. It runs gofmt on `cmd`, `internal`, `retro` and `blockview`,
+   then `go vet` and `go test`, builds the binary from the vendored sources in the pinned Go
+   image, and writes `VERSION` and `SHA256SUMS`.
+3. The job `publish` waits for the approval of the required reviewer of the environment
+   `release`.
 4. After the approval it checks `SHA256SUMS`, refuses to sign when the signing key is not built
    into this release (`relsign embedded`), signs, verifies the signature and publishes the
    release.
 
-A manual run (Actions, release, Run workflow) is a dry run: build and artifacts only, nothing is
-signed or published.
+A manual run (Actions, release, Run workflow) is a dry run: it builds and keeps the artifacts,
+and nothing is signed or published.
 
 ## One-time setup (repository owner)
 
@@ -38,7 +40,7 @@ go run ./cmd/relsign genkey ~/restic-release-key/release-signing.key ~/restic-re
 
 Add the content of the `.pub` file as one quoted line between `// BEGIN KEYS` and `// END KEYS`
 in `internal/relkeys/keys.go` and commit it. Then create the environment with yourself as
-required reviewer and store the private key as its secret. The key is read from the file and is
+required reviewer and store the private key as its secret. The key is read from the file and
 never shown:
 
 ```sh
@@ -52,12 +54,12 @@ Keep a copy of the private key in the password manager.
 ## How update verifies
 
 `restic-pve update` (by hand, or daily from `restic-pve-update.timer`) downloads `SHA256SUMS` and
-`SHA256SUMS.sig` from the latest release and checks the signature against the keys built into the
-installed binary. It then checks the SHA-256 of `VERSION` and of the binary, accepts only a
+`SHA256SUMS.sig` from the latest release and checks the signature against the keys built into
+the installed binary. It then checks the SHA-256 of `VERSION` and of the binary, accepts only a
 strictly newer version, runs the new binary with `version`, and renames it over the installed
 one. Any failure leaves the installed binary untouched and exits 1.
 
-The first install is different: the install line downloads the binary over HTTPS from GitHub and
+The first install is different. The install line downloads the binary over HTTPS from GitHub and
 runs it, so that download is protected by HTTPS only.
 
 ## Check a download by hand
@@ -85,7 +87,9 @@ sha256sum -c SHA256SUMS             # every asset OK
 
 The installed binary trusts only the keys built into it.
 
-- Planned rotation: publish one release that is signed with the old key and carries both keys,
-  let the hosts update, then sign with the new key and remove the old line from `keys.go`.
-- No trusted key left: `restic-pve update` refuses every new release. Run the install line on the
-  host again; it replaces the binary without the signature check.
+- For a planned rotation, publish one release that is signed with the old key and carries both
+  keys, let the hosts update, then sign with the new key and remove the old line from `keys.go`.
+- With no trusted key left, `restic-pve update` refuses every new release. Run the install line
+  on the host again; it replaces the binary without the signature check.
+
+[Back to the index](README.md)

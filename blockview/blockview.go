@@ -3,7 +3,7 @@
 // its Status and Legend boxes in the retro house style (package retro).
 //
 // The demo ("restic-pve demo pack") and the live view of a real guest backup on the backup
-// machine both draw through this package, so they cannot drift apart. docs/house-style.md
+// machine both draw through this package, so they cannot drift apart. docs/reference/house-style.md
 // describes the view.
 //
 // The packed picture: the backup keeps only the blocks that hold data and stores them packed.

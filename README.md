@@ -1,422 +1,163 @@
 # restic-pve
 
-First time on a Proxmox VE host? Read [docs/onboarding.md](docs/onboarding.md).
+`restic-pve` is one static binary that lets a separate backup machine copy the virtual machines
+of a Proxmox VE host offsite, encrypted with restic. It exists because backups are daunting, and
+ransomware is scary for exactly that reason: this tool tries to make each backup job a few steps
+you can follow and check.
 
-`restic-pve` is one static Go binary with two roles. On a Proxmox VE host (host role) it lets a
-backup machine pull a consistent image of a guest over SSH (`vzdump --stdout`) without root SSH
-and without any other software on the hypervisor. On the backup machine (backup role) it turns
-that image into a stream restic stores and deduplicates, turns a stored image back into a file
-the host can restore, and shows the running backup. One static binary: its few libraries (the
-terminal screens use `tcell` and `tview`) are compiled in and kept in this repository under
-`vendor/`, so the build downloads nothing and neither machine needs shared libraries.
+![The block view: blocks with data are read and packed into one yellow run that grows from the top left](docs/img/block-view.png)
 
-On the host there is the binary, one locked user with one restricted key, one sudoers file, one
-settings file and a daily update timer. Everything the binary writes is compiled into it
-(`go:embed`). `restic-pve uninstall` removes all of it.
+The block view halfway through a demo run (`restic-pve demo pack`, made-up disk, reads no data).
 
-This repository holds the tool, its tests, the release workflow and the releases. The backup
-machine's control code and its configuration stay on that machine; `request` below is the
-interface between the two machines, and `stream` is what the backup machine runs for each guest.
+This repository is the tool. On the Proxmox host it is complete: install, hand out guest images,
+update itself, uninstall. On the backup machine it provides the `stream`, `watch`, `status`,
+`keys` and `space` commands. Everything else on the backup machine (the schedule, the calls to
+restic and rclone, the setup) is still done by control code that is not published. Making the
+backup machine installable from this repository alone is the next stage. You cannot set up a
+complete offsite backup from this repository today.
 
-## Screens
+## Is this for you?
 
-The screens of the backup machine, in the retro look the whole tool uses. Captured from a terminal
-with made-up names.
+It fits if:
+
+- you run Proxmox VE 8.2 or newer (vzdump with fleecing) on linux/amd64, and want offsite copies
+  of its QEMU virtual machines;
+- you have, or will have, a separate Linux machine that does the backups;
+- you want to read every file the tool puts on the hypervisor, and remove it with one command.
+
+It is not for you (yet) if:
+
+- you need a backup machine you can install from here today (see [State and roadmap](#state-and-roadmap));
+- you back up LXC containers: the host side offers only guests from `qm list`;
+- you need arm64, or a storage other than Google Drive with a guided setup (Google Drive is the
+  only tested storage);
+- you need changed-block reads: every guest backup reads the whole disk, and restic
+  deduplicates what did not change;
+- one backup machine has to serve several Proxmox hosts.
+
+It does not replace or touch an existing vzdump job or Proxmox Backup Server. On the host it adds
+one restricted backup user and the few files listed in [docs/host.md](docs/host.md).
+
+## What you get
+
+1. Offsite backups. Guest images end up in a restic repository on Google Drive, through rclone,
+   encrypted by restic. On the backup machine, `restic-pve status` says whether every source and
+   guest has a recent checked copy away from the site.
+2. Performance. The host side and the stream reader are native Go. Running guests are read with
+   Proxmox's own vzdump and fleecing, so they keep their speed while they are copied. The stream
+   puts each disk back in disk order, so unchanged regions give identical bytes and restic
+   stores them once.
+3. A security concept you can follow. The backup machine logs in to the Proxmox host as a locked
+   user, with one key, from one address. That key can ask for an image of an allowed guest and
+   nothing else. `restic-pve keys` lists every key on the backup machine, what it does, and the
+   one that needs a copy elsewhere (the repository password); it can check your copy.
+4. Made for everyday admins. The install form explains each value in two or three sentences,
+   with an example or a list to pick from, and nothing changes on the host before you choose
+   Install. When something is wrong, the status screen names the command that fixes it.
+
+## See it
 
 | | |
 |---|---|
-| ![Status: every source and guest has a recent copy away from the site](docs/img/status-ok.png) | ![Status with a warning: one source is too old, and the line at the bottom says what to do](docs/img/status-warning.png) |
-| **Status.** Is there a recent copy away from the site, have I seen a restore work, what runs now and next. | **Status with a warning.** The bottom line names the problem and the command that fixes it. |
-| ![Keys: the admin's keys, what each does and what losing it means](docs/img/keys.png) | ![Password check: a wrong copy is refused without showing what was pasted](docs/img/keys-proof-wrong.png) |
-| **Keys.** Every key by presence only. One needs a copy away from the machine. | **Password check.** Paste your copy; it is never shown. Here a wrong one is refused. |
+| ![Install form, summary screen: backup machine, public key, guests, fleecing storage, limits and the Install button](docs/img/install-summary.png) | ![Live block view of a guest backup: yellow run of blocks already in the backup, white blocks read ahead, dots not read yet](docs/img/watch-running.png) |
+| On the Proxmox host: `restic-pve install`. The last of six screens; nothing is written before Install. | On the backup machine: `restic-pve watch`. A real guest backup; every change on the map is a real event. |
+| ![Status screen with one source too old and the command that fixes it on the bottom line](docs/img/status-warning.png) | ![Keys screen: five keys, which one needs a copy away from the machine, and what losing each one means](docs/img/keys.png) |
+| On the backup machine: `restic-pve status`. The bottom line names the problem and the command. | On the backup machine: `restic-pve keys`. Only the repository password needs a copy elsewhere. |
 
-## Roles
+All screens, with their keys: [docs/screens.md](docs/screens.md).
 
-The tool knows which machine it runs on:
+## Try it in two minutes
 
-- **Proxmox host**: `/etc/pve` is a folder or `/etc/restic-pve.conf` exists.
-- **Backup machine**: the environment variable `RESTIC_PVE_STATE` is set (the state folder, for
-  example `/state`).
-- Both hold: Proxmox host. A Proxmox host never runs a backup-role command by accident.
-
-A command of the other role is refused before it does anything, with exit 64 and one line, for
-example `restic-pve install is for the Proxmox host; this is the backup machine. Nothing was
-changed. Run it in a root shell on the Proxmox host.` When neither fact holds, the host
-commands work as before, and a backup-role command says to set `RESTIC_PVE_STATE` (exit 78).
-`restic-pve` without a command prints the usage of this machine's role.
-
-`restic-pve version` prints the version on stdout exactly as before (`vX.Y.Z` and a newline;
-released hosts compare it during their self-update). When stderr is a terminal it adds the role
-on stderr, for example `role: backup machine`.
-
-## Install, update, remove
-
-In a root shell on the Proxmox VE host:
-
-```
-curl -fsSLo /usr/local/sbin/restic-pve https://github.com/norandom/restic-pve/releases/latest/download/restic-pve-linux-amd64 && chmod 755 /usr/local/sbin/restic-pve && restic-pve install
-```
-
-`install` opens a full-screen form in the terminal (a retro disk-tool look, see
-[docs/house-style.md](docs/house-style.md)), one screen per value: the backup machine address, its
-public key, the guests (a checklist), the storage for fleecing images (a list), the limits and a
-summary with `[ Install ]`. Nothing changes before Install. Run `restic-pve install` again to
-change a value. Without a terminal, or with `restic-pve install --plain`, it asks the same
-questions line by line.
-
-The host then updates itself: `restic-pve-update.timer` runs `restic-pve update` daily, which
-accepts only a newer release whose checksums are signed with a key built into the installed
-binary. `restic-pve update` does the same by hand. `restic-pve uninstall` removes everything.
-
-The first download is protected by HTTPS only; [docs/release-signing.md](docs/release-signing.md)
-shows how to check it against the signed checksums.
-
-## Subcommands
-
-| Command | Who | What |
-|---|---|---|
-| `request ping` | backup identity (forced command, sudo) | prints `ok` |
-| `request info <vmid>` | backup identity | one JSON line: guest, disks, fleecing state, conf values, PVE and binary version |
-| `request dump <vmid>` | backup identity | `vzdump --stdout` VMA stream on stdout, vzdump log on stderr |
-| `install [--plain]` | root | asks for the site values (form, or line by line), installs or changes the identity |
-| `update` | root | replaces itself with the latest signed release |
-| `uninstall` | root | removes the identity, its files and the binary |
-| `version` | anyone | prints the version |
-
-Backup machine:
-
-| Command | Who | What |
-|---|---|---|
-| `stream backup\|verify\|to-vma\|to-raw` | the backup machine's control code | the stream program, see [Stream contract](#stream-contract) |
-| `status [--plain]` | the admin, scripts | is there a recent copy away from the site, have I seen a restore work, what runs now and next; plain lines and an exit code without a terminal |
-| `keys [--plain]` | the admin | every key of this machine, what it does, where it is, which one needs a copy away; `p` proves the password copy |
-| `space [--plain\|--check]` | the admin; `--check` the control code | storage space, backup sizes, keep rules, the warning rule; `--check` prints one line |
-| `watch [--once]` | the admin | the guest backup that runs now as the block view, or the progress of a local source; one plain line without a terminal or with `--once` |
-| `version` | anyone | prints the version |
-
-What the screens read (they never change anything by looking; the storage is read at most every
-six hours, or on `r`, at nice 19 and idle I/O priority; while a backup runs an existing cache is
-shown and the read waits):
-
-| Variable | Read by | Meaning, example |
-|---|---|---|
-| `RESTIC_PVE_STATE` | all | state root: `records.json`, `status.json`, `jobs/<name>.json` and `.lock`, `run.lock`, `guests/` for the guest profile, `status-cache.json` (written), `password-escrow-confirmed` (written by the proof); `/state` |
-| `BACKUP_CONFIG` | status, keys, space | `backup.toml`: `[repository] base`, `[[source]]`, `[retention]`, `keep_last`, `[alerts] stale_days`, `[schedule]`; `/app/config/backup.toml` |
-| `RESTIC_PASSWORD` | status, space, keys | the password in use, passed to restic in its environment only |
-| `RESTIC_REPOSITORY_BASE` | status, keys, space | overrides `[repository] base` |
-| `RCLONE_CONFIG` | keys (section name only), restic and rclone children | the rclone config |
-| `RESTIC_PVE_KEYS` | keys | folder with `ssh/id_ed25519` and `guest-ssh/id_ed25519` (checked by existence); `/config` |
-| `RESTIC_PVE_START_HINT` | status, watch | the start command in the actions; `'./backup.sh <source>'` |
-| `DISCORD_WEBHOOK_URL`, `RUNNER_TOKEN`, `OPENOBSERVE_USER`, `OPENOBSERVE_PASSWORD` | status, keys | set or not set only; values are never read into output |
-| `TERM`, `NO_COLOR`, `TZ` | all screens | `TERM=dumb` gives plain lines, `NO_COLOR` no colours, times in `TZ` |
-
-`status --plain` prints one fact per line, words separated by two spaces (`copy <instance>
-yes|no|unknown <age> ...`, `restore-test`, `drill`, `running`, `last-job`, `next`, `space`,
-`updates`, `alerts`, `password-proof`, `problem`, `verdict safe|not-safe|unknown`). Exit codes:
-0 every source and guest is safe, 1 at least one is not safe or not known, 64 usage, 78 a
-variable is missing or the config cannot be read. `space --check`: 0 no warning, 1 warning
-(free below twice the largest recent run, or below a tenth of the total), 2 not known.
-
-`watch` reads `<RESTIC_PVE_STATE>/guests/view` (the folder `stream backup --view-dir` writes)
-and `<RESTIC_PVE_STATE>/status.json` for a local source, and never writes. When no backup runs it shows `RESTIC_PVE_START_HINT`, the command that starts
-one on this machine (for example `./backup.sh <source>`); without that variable it stops with
-exit 78 and names it. It closes itself ten minutes after the last running backup; leaving it
-never stops a backup. `NO_COLOR` keeps the layout without colours.
-
-`request` exit codes:
-0 ok, 2 VM missing, 64 refused, 73 fleecing storage below its free-space limit,
-75 busy, 78 invalid `/etc` configuration, otherwise vzdump's status. It reads one
-settings file, `/etc/restic-pve.conf` (strict `KEY=value`, every key once), and
-locks `/run/restic-pve.lock` during a dump. Every other request is refused with
-exit 64.
-
-```
-FLEECING_STORAGE=fast-ssd
-FLEECING_MIN_FREE_GIB=32
-FLEECING_ABORT_FREE_GIB=8
-BWLIMIT_KIB=40960
-MAX_WORKERS=1
-VMIDS=100 101
-```
-
-`VMIDS` is the allow list: guest IDs separated by single spaces, no duplicates.
-A missing or invalid file is exit 78; a guest not in `VMIDS` is refused (64).
-
-The backup key and sudo reach only `request`:
-
-```
-restrict,from="192.0.2.10",command="sudo -n /usr/local/sbin/restic-pve request $SSH_ORIGINAL_COMMAND" ssh-ed25519 AAAA...
-restic-backup ALL=(root) NOPASSWD: /usr/local/sbin/restic-pve request, /usr/local/sbin/restic-pve request *
-```
-
-The first sudoers entry matches `request` alone, so an empty ssh command reaches
-the binary and is refused with exit 64.
-
-### install
-
-`install` takes no argument or `--plain` (anything else is exit 64). It runs as root on a PVE
-host only: when `qm` or `pvesm` is not in `/usr/sbin:/usr/bin:/sbin:/bin` it stops with one line.
-The values and their rules:
-
-1. backup machine address for `from=` (`^[A-Za-z0-9.:,*?!/_-]{1,255}$`)
-2. public key, one line `ssh-ed25519 <base64> [comment]` (a real ed25519 key blob; only type and
-   key are stored)
-3. guests, each once, each listed by `qm list`, at least one
-4. fleecing storage, one of the active storages of `pvesm status`
-5. the limits: `FLEECING_MIN_FREE_GIB`, `FLEECING_ABORT_FREE_GIB` (below the first), the read
-   limit in MiB/s (stored as `BWLIMIT_KIB`), `MAX_WORKERS` (1-16)
-
-**Form.** When stdin and stdout are a terminal, `TERM` is set and not `dumb`, the terminal is at
-least 60x20 and `--plain` is not given, install shows a full-screen form in the project's retro
-disk-tool look ([docs/house-style.md](docs/house-style.md)): a blue screen, a grey title bar with
-the step, a framed box with the explanation and the field or list, a Progress box and a Help box
-below it, and a grey key bar at the bottom. The terminal is restored on exit, Ctrl-C, SIGTERM,
-SIGHUP and panic. One screen per value: text fields for address and key (an empty field shows a
-grey example that is never taken as the value; the Help box shows the example too), a checklist
-of `qm list` (Up/Down or j/k, Space ticks), a single choice of the active storages with free GiB,
-the limits with "Keep these (recommended)" or "Change" (four number fields, the Help box shows
-the range of the field being edited), and a summary with `[ Install ]  [ Back ]  [ Cancel ]`,
-focus on Install. The focused row or button is yellow. Enter continues when the value is valid,
-else its rule shows in the Help box and the screen stays; Esc or Shift-Tab goes one screen back
-with the values kept; Ctrl-C or Cancel is exit 1 and nothing changed. A pasted key with a
-trailing newline counts as Enter; bracketed paste is understood. `NO_COLOR` keeps the layout
-without colours (focus in inverse video); a locale that is not UTF-8 gets ASCII frames.
-
-**Plain** (`--plain`, or no terminal). One answer per line from stdin, the questions on stdout,
-with an example for address and key. Enter takes the default in brackets; an invalid answer
-prints its rule and the question comes again; three invalid answers, or stdin at its end
-(`no terminal to ask on`), stop with exit 1 and nothing changed. The guests are typed as VM
-numbers separated by spaces or commas; the limits follow `Change the limits? [y/N]`.
-
-The defaults on a fresh host: no address, no key, no guests, no storage, limits 32 / 8 GiB,
-40 MiB/s, 1 worker. On an installed host they are the current values: address and key from the
-backup user's `authorized_keys`, the rest from `/etc/restic-pve.conf`. The user is
-`restic-backup`; a different user in an existing `/etc/sudoers.d/restic-pve` (older install) is
-kept. A summary follows; in plain mode then `Install with these values? [y/N]`, where anything
-but `y` is exit 1 and nothing changed.
-
-Install is idempotent and reports each file as `written` or `unchanged`: the sudo package
-(only if missing), the user (shell `/bin/sh`, password locked), `~/.ssh/authorized_keys`,
-`/etc/sudoers.d/restic-pve` (checked with `visudo -cf` first), the binary at
-`/usr/local/sbin/restic-pve`, `/etc/restic-pve.conf` and the automatic update:
-`/etc/systemd/system/restic-pve-update.service` (oneshot, `restic-pve update`) and
-`/etc/systemd/system/restic-pve-update.timer` (daily, random delay up to 6 h, persistent), both
-compiled in from `internal/install/units/`. It then runs `systemctl daemon-reload` and
-`systemctl enable --now restic-pve-update.timer`. The timer is always on; there is no setting
-for it. It then removes the files of the bash
-wrapper if present: `/usr/local/sbin/restic-vzdump`, `/etc/sudoers.d/restic-vzdump`,
-`/etc/restic-vzdump.conf` and `/etc/restic-vzdump.allow`. A new guest or a changed limit is the
-same install again.
-
-`install` reads the answers or keys from its own stdin, the terminal. On the PVE host the binary is
-downloaded straight to `/usr/local/sbin/restic-pve` and run from there; install then leaves the file in place and only sets owner and mode. Run
-from any other path, it copies itself there.
-
-### uninstall
-
-`uninstall` refuses with exit 75 while a dump holds the lock. Otherwise it runs
-`systemctl disable --now restic-pve-update.timer` (if the timer file is there) and removes,
-each reported as `removed` or `absent`: both update units (then `systemctl daemon-reload`),
-`/etc/sudoers.d/restic-pve`,
-`/etc/restic-pve.conf`, the four bash wrapper files, the lock file, the backup user
-with its home (`userdel --remove`; the name comes from the sudoers entry, and when
-that entry is missing or not the one install writes, users are left alone), and
-last the binary. The sudo package stays.
-
-### update
-
-`update` downloads from `https://github.com/<repo>/releases/latest/download/`,
-verifies `SHA256SUMS.sig` against the Ed25519 keys compiled into the binary
-(`internal/relkeys`), checks the hashes of `VERSION` and the binary, requires a
-strictly newer version, runs the new binary with `version`, and renames it over
-the installed one. Any failure leaves the installed binary untouched and exits 1,
-so the timer's service shows as failed. Up to date is one line and exit 0. A build
-without keys refuses to update. The rename is atomic: a dump that is running keeps
-the old file open and finishes with it.
-
-## Stream contract
-
-`restic-pve stream` is the former `vmastream` program of the backup machine, moved here with its
-contract unchanged. The control code that calls it parses this contract; any change to the
-flags, the exit codes or the result line is a change of the interface.
-
-A live VMA stream sends disk clusters in whatever order they arrive and interleaves several
-devices, so two backups of an almost unchanged guest have little in common byte for byte.
-`stream backup` reorders the clusters into plain per-device order (the RVS1 container): unchanged
-disk regions give identical bytes, and restic deduplicates them. A full image is never stored on
-disk; a bounded RAM reorder buffer handles out-of-order clusters.
-
-| Command | Input | Output |
-|---|---|---|
-| `backup` | VMA via `ssh … dump <id>` or `--input FILE` | RVS1 on stdout, manifest JSON (`--manifest-out`) |
-| `verify` | RVS1 on stdin or `--in` | fingerprint check against trailer and `--manifest` |
-| `to-vma` | RVS1 on stdin or `--in` | uncompressed VMA (`--out FILE` or `-`) |
-| `to-raw` | RVS1 on stdin or `--in` | `<dir>/<device>.raw` (sparse) and `<dir>/SHA256SUMS` |
-
-`restic-pve stream <command> -h` lists the flags. All hosts, ids and paths come from flags; the
-command has no built-in site value and no default folder.
-
-**Environment.** restic starts `stream backup` with restic's own environment. Before anything
-else, the command removes every variable that holds or points to a secret (names containing
-`PASSWORD`, `PASSPHRASE`, `SECRET`, `TOKEN`, `WEBHOOK` or `CREDENTIAL`, or ending in `_KEY` or
-`_PASS`, `RESTIC_PASSWORD` among them) from its own environment, so `ssh` and anything else it
-starts never receive them. `VMASTREAM_VIEW=off` turns the block view off whatever the flags say.
-
-### backup
-
-`backup` runs `ssh -F <config> -T -o BatchMode=yes <host> dump <vmid>` (fixed argv, no shell;
-`ssh` is looked up in `PATH`). The far side is `restic-pve request dump` on the Proxmox host,
-which writes the VMA stream to stdout and the vzdump log to stderr. `--input FILE` reads a VMA
-file instead (tests).
-
-The pipeline is VMA reader (all structural checks) → reorder buffer → per-device `sha256ct`
-fingerprint and RVS1 writer on stdout. The trailer is written last, only after the source
-exited cleanly. The manifest (`--manifest-out`) is written only on success (temporary file,
-then rename). Any failure ends the run before the trailer, so stdout never holds a complete
-RVS1 stream for a failed backup. The trailer and the manifest name the producer
-`vmastream dev`, as every stored image so far does, so the stored bytes stay the same.
-
-Memory: `--ram-mib` (default 512) caps the reorder buffer: buffered clusters, patch hash slots
-(32 bytes each) and the zero-cluster bitmaps (1 bit per 64 KiB cluster). It must cover the
-bitmaps plus a 256 KiB margin. The RVS1 writer's open data frame (up to 64 MiB) and the Go
-runtime come on top: plan about `ram-mib + 64 MiB + overhead`. When the cap would be exceeded,
-the farthest early cluster is written ahead as a patch and only its hash stays in RAM. Only
-when hash slots and bitmaps exhaust the cap does the backup stop with exit 7: raise
-`--ram-mib`, or lower `MAX_WORKERS` in `/etc/restic-pve.conf` on the host.
-
-`--view-dir DIR` writes the block view's state file (`live`, `vm-<vmid>.last`) for `watch`;
-best effort, it never affects the stream. Without it there is no view. `--view-name` is the
-guest name shown.
-
-vzdump log lines are classified by one pattern table:
-
-| Log | Result |
-|-----|--------|
-| `issuing guest-agent 'fs-freeze'`, no freeze error | consistency `application` |
-| `skipping guest-agent 'fs-freeze'` | consistency `crash` + detail |
-| fs-freeze error or timeout | consistency `crash` + detail |
-| freeze failure with `Input/output error`, `I/O error`, `Structure needs cleaning`, or `Read-only file system` | ssh is stopped at once, exit 10; check the guest (fsck) |
-| `backup mode: stop` (a guest that is not running), no freeze error | consistency `stopped` |
-| no freeze line, or an unrecognised log | consistency `crash`, detail `agent status unknown` |
-| any fleecing warning or error | ssh is stopped, exit 5 |
-| qemu-img `Formatting '…'`, PVE notification failures | info; never forwarded |
-
-Lines without a vzdump level prefix come from ssh or the host side and count as errors, except
-the known informational lines above. Host exit 73 (fleecing storage below its free-space limit)
-is a non-transient source failure (exit 6).
+The demo reads nothing and changes nothing. It runs on any linux/amd64 machine with a terminal,
+as any user:
 
 ```sh
-restic-pve stream backup --ssh-config ./ssh_config --ssh-host pve.example --vmid 100 \
-  --manifest-out ./vm-100.manifest.json > vm-100.rvs
+curl -fsSLo /tmp/restic-pve https://github.com/norandom/restic-pve/releases/latest/download/restic-pve-linux-amd64
+chmod 755 /tmp/restic-pve
+/tmp/restic-pve demo pack
 ```
 
-### verify, to-vma, to-raw
-
-All three read RVS1 in one pass from stdin, or from `--in FILE`. They recompute `sha256ct` for
-every device and compare it with the trailer and, with `--manifest M`, with the manifest
-(devices, sizes, digests). A digest mismatch or a malformed stream exits 3, a manifest mismatch
-exits 8, a manifest file that cannot be opened exits 7. Each patched position must be patched
-only once, and its placeholder must be zero.
-
-- `verify` writes nothing but the stderr result.
-- `to-vma` writes a VMA stream with a fresh uuid, the current time, the config blobs verbatim
-  and every cluster of every device exactly once. The final extent is written only after every
-  digest matched; on any failure the output is a truncated VMA stream that `qmrestore` rejects.
-  `--out FILE` must not exist.
-- `to-raw --dir D` writes `D/<device>.raw` per device as sparse files and then `D/SHA256SUMS`
-  (`sha256sum -c` checks it). Existing files are never overwritten (exit 7). On any failure every
-  raw file is renamed to `*.raw.invalid` and no `SHA256SUMS` is written.
+A simulated full backup of a 125 GiB disk runs for under a minute; `q` quits. `demo pack
+incremental` shows a run where most blocks did not change. Afterwards:
 
 ```sh
-restic-pve stream verify --manifest ./vm-100.manifest.json < vm-100.rvs
-restic-pve stream to-vma --in vm-100.rvs --manifest ./vm-100.manifest.json --out vm-100.vma
-restic-pve stream to-raw --in vm-100.rvs --dir ./restore/example
+rm /tmp/restic-pve
 ```
 
-### Exit codes and stderr
+## For admins
 
-| Code | Meaning |
-|------|---------|
-| 0 | ok |
-| 2 | usage (unknown command, bad flags or arguments) |
-| 3 | integrity (VMA md5/uuid/reserved/blockinfo error, digest mismatch, malformed RVS1) |
-| 4 | forbidden content (memory state or unknown device) |
-| 5 | fleecing not active (reported by vzdump) |
-| 6 | source failed (ssh/vzdump non-zero exit, truncated stream) |
-| 7 | local I/O (input/output files, stdout, output folder), RAM cap exhausted |
-| 8 | manifest mismatch or missing device |
-| 9 | internal error (panic or contract violation; never transient) |
-| 10 | guest filesystem error during freeze (immediate stop; never transient) |
+| I want to | Page |
+|---|---|
+| install it on a Proxmox host | [docs/onboarding.md](docs/onboarding.md) |
+| know what ends up on the host and what the backup user may do | [docs/host.md](docs/host.md) |
+| update it, or check a download | [docs/host.md#updates](docs/host.md#updates) |
+| remove it | [docs/host.md#remove-it](docs/host.md#remove-it) |
+| use status, keys, space and watch on the backup machine | [docs/backup-machine.md](docs/backup-machine.md) |
+| see every screen and its keys | [docs/screens.md](docs/screens.md) |
+| fix a message the tool printed | [docs/troubleshooting.md](docs/troubleshooting.md) |
 
-The role guard comes first: on a Proxmox host `stream` is refused with exit 64 and no result
-line, and without `RESTIC_PVE_STATE` with exit 78.
+## Trust
 
-`transient` is true for ssh exit 255 (connection, authentication or host key), host exit 75
-(busy) and an ssh killed by a foreign signal. An explicit `ERROR: Backup of VM <id> failed -
-<reason>` overrides the ssh status: only reasons matching `lock`, `locked`, `busy`, `timeout`,
-`timed out`, `temporarily`, `try again` or `connection` are transient. Exit 10 reports
-`guest filesystem error: <the vzdump line>` with the hint `check the guest (fsck); the backup was
-not written`.
+- On the host: the binary, one user with a locked password, one key entry, one sudoers file, one
+  settings file and a daily update timer. `restic-pve uninstall` removes all of it. The list is
+  in [docs/host.md](docs/host.md).
+- The backup key works only from the backup machine's address, and its forced command reaches
+  `restic-pve request` and nothing else: no shell, no root shell, no guest outside the allow
+  list.
+- Releases are built by GitHub Actions and published only after the maintainer approves the
+  publish job. The checksums are signed with an Ed25519 key.
+- The host updates itself only to a strictly newer release whose signature matches a key built
+  into the installed binary. A failed check leaves the installed binary as it was.
+- One static binary (`CGO_ENABLED=0`), with its few libraries vendored in `vendor/`. The build
+  downloads nothing.
+- The first download is protected by HTTPS only. How to check it against the signed checksums:
+  [docs/host.md#check-a-download](docs/host.md#check-a-download).
 
-Stdout carries stream data only. Stderr carries human-readable messages and JSON lines (one
-object per line, no prefix). The last line is always the result:
+## Documentation
 
-```json
-{"type":"result","status":"ok|error","code":0,"transient":false,"message":"…"}
-```
+The same index, with a line more per page: [docs/README.md](docs/README.md).
 
-`help` and `-h` print usage and exit 0 without a result line. A caller treats a missing result
-line as a non-transient failure. `backup` also writes:
+For adopters:
 
-```json
-{"type":"progress","dev":"drive-scsi0","bytes_done":0,"total_bytes":0,"percent":0,"ram_bytes":0,"patches":0}
-{"type":"consistency","value":"application|crash|stopped","detail":"…"}
-{"type":"vzdump","level":"warn|error","line":"…"}
-```
+- [Is this for you?](#is-this-for-you) and [Try it in two minutes](#try-it-in-two-minutes), above
+- [docs/host.md](docs/host.md): every file on the host, and what the backup user can and cannot do
 
-`progress` comes every `--progress-interval` and once at the end. A successful backup result
-also has `buffer_ram_peak` and `patch_count`. `consistency` comes once. `vzdump` forwards the
-warn and error lines of the vzdump log only.
+For admins:
 
-## Release assets (tag `vX.Y.Z`)
+- [docs/onboarding.md](docs/onboarding.md): install on a Proxmox host, screen by screen
+- [docs/host.md](docs/host.md): the host files, settings, updates, removal
+- [docs/backup-machine.md](docs/backup-machine.md): status, keys, space and watch
+- [docs/screens.md](docs/screens.md): all screens, with machine, command and keys
+- [docs/troubleshooting.md](docs/troubleshooting.md): messages and what to do
 
-Built by `.github/workflows/release.yml` on a pushed tag, signed and published after the
-repository owner approves the publish job (see [docs/release-signing.md](docs/release-signing.md)):
-`restic-pve-linux-amd64`, `VERSION` (the tag plus newline), `SHA256SUMS` (`<sha256>  <name>`
-lines for the binary and `VERSION`) and `SHA256SUMS.sig` (base64 of the Ed25519 signature over
-the exact bytes of `SHA256SUMS`).
+For the maintainer:
 
-`cmd/relsign` creates the key and signs: `relsign genkey <private> <public>`,
-`relsign pubkey`, `relsign sign SHA256SUMS`, `relsign verify SHA256SUMS`,
-`relsign embedded <base64-pubkey>`. The private key comes from the environment
-variable `RELEASE_SIGNING_KEY` and is never printed.
+- [docs/release-signing.md](docs/release-signing.md): making and signing a release, key rotation
 
-## Build and test
+For developers (reference):
 
-Go runs in the pinned image only:
+- [docs/reference/commands.md](docs/reference/commands.md): every command per role, flags, exit codes
+- [docs/reference/request-interface.md](docs/reference/request-interface.md): `request` between the machines, settings file, sudo rule
+- [docs/reference/stream-contract.md](docs/reference/stream-contract.md): `stream` flags, output, result line, exit codes
+- [docs/reference/release-assets.md](docs/reference/release-assets.md): the files of a release and `relsign`
+- [docs/reference/build-and-test.md](docs/reference/build-and-test.md): pinned image, vendoring, checks, size
+- [docs/reference/house-style.md](docs/reference/house-style.md): the retro screen look
 
-```
-docker run --rm -u "$(id -u):$(id -g)" -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOLCHAIN=local \
-  -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -v "$PWD:/src:ro" -w /src golang:1.27.1-alpine3.24 \
-  sh -c 'gofmt -l cmd internal retro blockview ; go vet ./... && go test ./...'
-```
+## State and roadmap
 
-The libraries are vendored (`vendor/`, pinned in `go.mod` and `go.sum`); `GOPROXY=off` proves
-that nothing is fetched. To update a library, run `go get <module>@<version> && go mod tidy &&
-go mod vendor` once in the same image with the network, and review the `vendor/` diff.
+Works today:
 
-Release build (the release workflow does this):
+- the host role: install form, `request`, signed self-update, uninstall;
+- on the backup machine, `status`, `keys`, `space` and `watch`, in the container image of the
+  maintainer's own backup machine, with the unpublished control code around them;
+- `stream`, the same program that machine has used for guest images, moved into this tool with
+  its contract unchanged. Switching that machine's guest jobs over to it is prepared, not done.
 
-```
-GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=vX.Y.Z -X main.releaseRepo=<owner>/<repo>" \
-  -o restic-pve-linux-amd64 ./cmd/restic-pve
-```
+Next, in this order, each stage shipped on its own:
 
-Size of the release binary (linux/amd64, `golang:1.27.1-alpine3.24`, the workflow's flags,
-static, measured 2026-11-19): 9,072,764 bytes (8.7 MiB) with both roles and the status, keys
-and space screens; 8,544,380 bytes before those screens, and the host role alone was
-7,471,228 bytes (7.1 MiB). The gate is 16 MiB; the self-update accepts at most 64 MiB.
-
-The wrapper tests run the test binary as the wrapper (helper process) against
-stub `qm`, `pvesm`, `pveversion` and `vzdump` scripts in a temp directory. They
-need no PVE host and no root.
+1. one install of the backup machine without a checkout, with verified updates and the schedule
+   inside the tool;
+2. guided setup of storage, sources, schedule and alerts on screens;
+3. pairing: no address or key copied between the machines by hand;
+4. back up now, guided restore and the restore drill through the tool;
+5. retirement of the old scripts on the backup machine.

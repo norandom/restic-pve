@@ -1,14 +1,19 @@
 # House style: the retro disk-tool look
 
-Every full-screen view of this project (the install form on the Proxmox host, the setup and key
-screens on the backup machine, the backup view, the restore screens) looks like one program: a
-DOS-era disk tool. A blue screen, white text, thin single-line boxes with yellow titles, a grey
+For developers who draw or change a screen of `restic-pve`: the reference the look comes from,
+the rules every screen follows, and where the code lives. Admins find the screens themselves in
+[../screens.md](../screens.md).
+
+Every full-screen view of this project (the install form on the Proxmox host, the status, keys
+and space screens on the backup machine, the backup view, and the setup and restore screens
+still to come) looks like one program: a DOS-era disk tool. A blue screen, white text, thin single-line boxes with yellow titles, a grey
 bar on top and a grey message bar at the bottom, yellow as the one highlight. The backup view is
 the centrepiece: a map of blocks for the whole disk, and a yellow run that grows left to right,
 top to bottom, line by line.
 
 The look is an homage in layout, characters, colours and movement. Names, logos and product
-texts of the original are not used anywhere on our screens. We call it the retro disk-tool look.
+texts of the original appear nowhere on these screens. The project calls it the retro disk-tool
+look.
 
 Without a terminal, with `TERM=dumb` or on a terminal that is too small, every program falls back
 to plain lines. With `NO_COLOR` the layout stays and the colours go.
@@ -17,7 +22,7 @@ to plain lines. With `NO_COLOR` the layout stays and the colours go.
 
 The reference is the full-screen disk defragmenter that came with MS-DOS 6.x. Microsoft licensed
 it from Symantec and it is a cut-down version of that vendor's own optimizer, which is why both
-look alike. We worked from pictures, not from memory.
+look alike. The work was done from pictures, not from memory.
 
 ### Sources
 
@@ -31,52 +36,52 @@ look alike. We worked from pictures, not from memory.
 | R6 | Wikipedia, "Microsoft Drive Optimizer" | The MS-DOS 6 program is a licensed, cut-down version of the Norton optimizer |
 | R7 | photogabble.co.uk, "Defrag like it's 1992" | Write-up of two browser recreations: `r` reading, `W` writing, `B` bad, `X` unmovable |
 
-R2 and R3 are video thumbnails (single frames); we did not watch the videos. R7 describes
+R2 and R3 are video thumbnails (single frames); the videos themselves were not watched. R7 describes
 recreations, not the original; it is used only where it agrees with R1 to R3.
 
 ### Confirmed (with the source)
 
-- **Layout** (R1, R2, R3). Row 1: a light grey bar, the menu word at the left in black, a key
+- Layout (R1, R2, R3). Row 1: a light grey bar, the menu word at the left in black, a key
   label at the right in inverse (white on black) while the program works. Rows 2 to about 18: the
   map, edge to edge, no frame. Below it, side by side, two boxes with thin single-line white
-  frames and their titles centred in the top line in yellow: **Status** on the left, **Legend**
+  frames and their titles centred in the top line in yellow: Status on the left, Legend
   on the right. Last row: a light grey bar with a status word in dark red on the left
   ("Writing...", "Reading...", "Updating FAT") and, after a vertical line, the program's name in
   dark red on the right.
-- **Map** (R1, R2, R3). One character cell per block, many blocks per cluster group
+- Map (R1, R2, R3). One character cell per block, many blocks per cluster group
   ("1 block = 54 clusters"). Cells sit in rows left to right, rows top to bottom. The last row
   stops where the disk ends; the rest of that row is plain background (R1, R2).
-- **Cells** (R1, R2, R3, legend text in R1 and R2). Used: a white tall cell with a small dark dot
+- Cells (R1, R2, R3, legend text in R1 and R2). Used: a white tall cell with a small dark dot
   in its middle (it looks like the code page 437 inverse bullet `◘`). Unused: a light shaded
   cell (looks like `░`, light shade). Done blocks: the same dotted cell in yellow. Reading: `r`.
   Writing: `W`. Bad: `B`. Unmovable: `X` (R1, R2, R4). The legend lists them in two columns:
   Used / Unused, Reading / Writing, Bad / Unmovable, then "Drive C: 1 block = N clusters".
-- **Colours** (R1, R2, R3). Blue screen, white text and frames, yellow box titles and done blocks,
+- Colours (R1, R2, R3). Blue screen, white text and frames, yellow box titles and done blocks,
   grey bars with black text, dark red text on the bottom bar.
-- **Status box** (R1, R2, R3). Line 1: "Cluster N" left, "P%" right. Line 2: a progress track the
+- Status box (R1, R2, R3). Line 1: "Cluster N" left, "P%" right. Line 2: a progress track the
   width of the box: shaded when empty, solid white where done (R2, R3). Line 3: "Elapsed Time:
   hh:mm:ss", centred. Line 4: the method ("Full Optimization"), centred.
-- **Movement** (R1, R2, R3 as stills). The yellow run starts in the top-left corner and grows
+- Movement (R1, R2, R3 as stills). The yellow run starts in the top-left corner and grows
   along the rows; `W` cells stand at the end of the yellow run (R2); the rest of the map is still
   white and shaded. The operator describes the motion as "a yellow progress bar that moves left
   to right, top to bottom, line by line".
-- **Frames** (R1, R2, R3). Thin single lines; no double lines, no shadows.
+- Frames (R1, R2, R3). Thin single lines; no double lines, no shadows.
 
 ### Not confirmed, or sources disagree
 
-- **The exact blue.** Emulator captures (R1, R2) show a light blue, about `#5555FF`; the CRT photo
-  (R3) shows a deeper blue, nearer `#0000AA`. R1 is binding for us, so we use `#5555FF`.
-- **The exact characters.** The used and unused cells are judged from their shape; we could not
-  confirm the code points from a manual. `◘` (CP437 0x08) and `░` (CP437 0xB0) match the pictures.
-- **The motion in time.** We saw stills only: how fast the marker moves, whether `r` and `W`
+- The exact blue. Emulator captures (R1, R2) show a light blue, about `#5555FF`; the CRT photo
+  (R3) shows a deeper blue, nearer `#0000AA`. R1 is binding, so the palette uses `#5555FF`.
+- The exact characters. The used and unused cells are judged from their shape; a manual that
+  confirms the code points was not found. `◘` (CP437 0x08) and `░` (CP437 0xB0) match the pictures.
+- The motion in time. Only stills were available: how fast the marker moves, whether `r` and `W`
   alternate per cell, and how the map looks between frames are not confirmed.
-- **The ancestor optimizer's own screen.** We found no picture of it; nothing here relies on it.
-- **The idle key label** ("F1=Help" instead of the stop key) appears only in a recreation (R7).
-- **The gaps between cells.** In R1 every cell column is separated by a thin line of
+- The ancestor optimizer's own screen. No picture of it was found; nothing here relies on it.
+- The idle key label ("F1=Help" instead of the stop key) appears only in a recreation (R7).
+- The gaps between cells. In R1 every cell column is separated by a thin line of
   background. That is the ninth pixel column of the VGA text font, which stays blank for these
-  characters. A modern terminal draws shades and blocks edge to edge, so our map has no gaps.
+  characters. A modern terminal draws shades and blocks edge to edge, so this map has no gaps.
 
-## 2. Our rules
+## 2. The rules
 
 These rules hold whatever library draws the screen.
 
@@ -134,23 +139,23 @@ row n        bottom bar   grey: keys or a status word                   "│ <pr
 
 ### Forms
 
-- **Main box**: titled with the step; first the explanation in two or three plain sentences,
+- Main box: titled with the step; first the explanation in two or three plain sentences,
   then a blank line, then the field, the list or the summary.
-- **Text field**: `> ` and a navy field to the end of the line; the cursor at the end of the value.
+- Text field: `> ` and a navy field to the end of the line; the cursor at the end of the value.
   Empty, it shows the example in grey; the example is never taken as the value. A value longer
   than the field shows its end after `…`.
-- **Pick list** (one of many): rows `( ) name ...` and `(*)` on the chosen one.
-- **Checklist**: rows `[ ] name ...`, `[x]` when ticked; Space ticks.
-- **Focus**: the focused row or button is drawn yellow with blue text from the pointer `►` to the
+- Pick list (one of many): rows `( ) name ...` and `(*)` on the chosen one.
+- Checklist: rows `[ ] name ...`, `[x]` when ticked; Space ticks.
+- Focus: the focused row or button is drawn yellow with blue text from the pointer `►` to the
   end of the line; without colour in inverse video.
-- **Buttons**: `[ Install ]  [ Back ]  [ Cancel ]`, the focused one yellow.
-- **Lower left box "Progress"**: "Step n of 5" and the share of steps done, a progress track,
+- Buttons: `[ Install ]  [ Back ]  [ Cancel ]`, the focused one yellow.
+- Lower left box "Progress": "Step n of 5" and the share of steps done, a progress track,
   the step's name and the job, centred, like the Status box.
-- **Lower right box "Help"**: the short help for the current field (an example, the allowed range,
+- Lower right box "Help": the short help for the current field (an example, the allowed range,
   the count of ticked rows). A broken rule shows here first in the error colours; the help stays
   below it when it still fits.
-- **Title bar**: program, step and its name on the left; `Ctrl-C=Cancel` on the right.
-- **Bottom bar**: the keys of this screen; `│ restic-pve` on the right.
+- Title bar: program, step and its name on the left; `Ctrl-C=Cancel` on the right.
+- Bottom bar: the keys of this screen; `│ restic-pve` on the right.
 
 ### The backup view (block map)
 
@@ -168,10 +173,10 @@ row n        bottom bar   grey: keys or a status word                   "│ <pr
 Reading...                                                          │ restic-pve
 ```
 
-- **Map**: one cell per block, from the top-left, left to right, top to bottom, no frame, one
+- Map: one cell per block, from the top-left, left to right, top to bottom, no frame, one
   column of margin. The block size is the disk size divided by the cells that fit, rounded up to
   whole MiB; the last row stops where the disk ends.
-- **Cell states** (character and colour as in the tables above):
+- Cell states (character and colour as in the tables above):
 
   | State | Meaning | Cell |
   |---|---|---|
@@ -184,16 +189,16 @@ Reading...                                                          │ restic-p
   | Not read yet | the live view knows nothing about it yet | white `·` |
 
   Bad (`B`) and unmovable (`X`) have no meaning in a backup and are not used.
-- **Movement**: there are two ways to show the progress of a backup on the map. Both grow a
+- Movement: there are two ways to show the progress of a backup on the map. Both grow a
   yellow run from the top-left, left to right, line by line. The view only shows what the
   backup really did; it never changes how the backup works.
-  - **In place.** The marker (`r`, then `W` while new data is written) moves one block at a
+  - In place. The marker (`r`, then `W` while new data is written) moves one block at a
     time, left to right, then on to the next row. Every block behind it turns yellow where it
     is (blocks with data as yellow `◘`, empty ones as yellow `░`), so the run reads like a
     progress bar. A full backup moves at an even pace and shows `W` on every block with data.
     An incremental backup races over unchanged blocks (they turn yellow without `W`) and stays
     on changed blocks, `r` and then `W`.
-  - **Packed.** Closest to the movement of the reference: the backup keeps only the blocks that
+  - Packed. Closest to the movement of the reference: the backup keeps only the blocks that
     hold data and stores them packed, so the blocks move. The next scattered block with data
     ahead of the run shows `r`; then the cell at the end of the run shows `W`; then that cell
     turns yellow and the block's old place becomes empty, and the next block is read in the
@@ -204,14 +209,14 @@ Reading...                                                          │ restic-p
     speeds up gradually (shorter `r` and `W`, then several blocks read and written together).
     An incremental backup lets unchanged blocks join the run quickly without `r` and `W`; only
     changed blocks are read and written.
-- **Status box**: "Block N" and the percentage; the progress track; "Elapsed Time: hh:mm:ss"; the
+- Status box: "Block N" and the percentage; the progress track; "Elapsed Time: hh:mm:ss"; the
   kind of run ("Full backup", "Incremental backup"). In the packed view "Block N" counts the
   blocks in the run, the percentage is the share of blocks with data in it, the kind of run
   ends in "· packed view", and at the end the last line reads "Done in hh:mm:ss" until the
   screen is closed.
-- **Legend box**: the states in two columns as above, then "Guest <id>:   1 block = N MiB"; in
+- Legend box: the states in two columns as above, then "Guest <id>:   1 block = N MiB"; in
   the packed view "Data: N blocks x M MiB".
-- **Bottom bar**: the status word in red ("Reading...", "Writing...", "Finished."), and
+- Bottom bar: the status word in red ("Reading...", "Writing...", "Finished."), and
   `│ restic-pve` on the right.
 
 ### The live view of a real backup
@@ -291,36 +296,36 @@ the last storage read on the right, framed boxes with yellow titles, one line wi
 the fixed sentence, the key bar at the bottom. They fit 80 x 24; below 60 x 20, with `TERM=dumb`,
 `--plain` or without a terminal they print plain lines.
 
-- **Status**: three boxes, one per question: "Is there a recent copy away from the site?" (one
+- Status: three boxes, one per question: "Is there a recent copy away from the site?" (one
   row per source instance and guest, not safe first, `■ NO` in the error colours), "Have I seen a
   restore work?" (restore test, drill, the bad-day guide), "Now and next" (running, next, space,
   updates and alerts, password proof). Under them the verdict: "All copies are recent and
   checked." or the first instance that is not safe with its one action. Enter lists all rows,
   `?` shows the help.
-- **Keys**: one box with two lines per key (name, copy away, state and where it is; what it
+- Keys: one box with two lines per key (name, copy away, state and where it is; what it
   does and what happens when it is lost), a box with the state of the password copy, a box with
   the release signing key note and the other secrets. `p` opens the proof box: a navy field that
   shows a fixed `●●●●●●` after the first key, whatever the length.
-- **Space**: Storage (total, used, free as reported), Backups and how long they are kept, Warning
+- Space: Storage (total, used, free as reported), Backups and how long they are kept, Warning
   (the rule in words with today's numbers; the action in the error colours when it holds), and
   the fixed sentence in yellow: do not delete or move files on the storage by hand.
 
 They redraw only when a file they read changes or the minute of "checked N min ago" turns, and
 close themselves after ten minutes without a key press.
 
-## 3. Where we differ from the reference, and why
+## 3. Where the screens differ from the reference, and why
 
-- **Our words.** Our menu bar names the program and the step, not a menu; our legend says
-  "Has data", "Empty", "In backup"; the bottom bar names our program. No product names.
-- **No `B` and `X`.** They have no meaning in a backup.
-- **Passed empty blocks turn yellow (shaded), in the in-place view.** In the reference, data is
+- Own words. The menu bar names the program and the step, not a menu; the legend says
+  "Has data", "Empty", "In backup"; the bottom bar names `restic-pve`. No product names.
+- No `B` and `X`. They have no meaning in a backup.
+- Passed empty blocks turn yellow (shaded), in the in-place view. In the reference, data is
   moved to the front, so the yellow run is solid. In the in-place view the empty blocks stay
   where they are; colouring them yellow keeps the run continuous, so it still reads as one
   progress bar. The packed view moves the blocks like the reference and needs no yellow shade.
-- **No gaps between cells.** Terminals draw shade and block characters to the cell edges.
-- **The forms** have no counterpart in the reference. They borrow its parts: grey bars, the
+- No gaps between cells. Terminals draw shade and block characters to the cell edges.
+- The forms have no counterpart in the reference. They borrow its parts: grey bars, the
   blue screen, yellow box titles, the two lower boxes (Progress like Status, Help like Legend).
-- **Smallest size 60 x 20** instead of the fixed 80 x 25 text mode; the map fills whatever size
+- Smallest size 60 x 20 instead of the fixed 80 x 25 text mode; the map fills whatever size
   the terminal has.
 
 ## 4. In this repository
@@ -338,3 +343,5 @@ something). The demo and the live view on the backup machine both draw through i
 `restic-pve demo [pack] [full|incremental]` shows the block map with a simulated run of a
 125 GiB disk: without `pack` in place, with `pack` packed (through `blockview`). It reads no data
 and is not in the usage line.
+
+[Back to the index](../README.md)

@@ -1,119 +1,82 @@
-# Setting up restic-pve on a Proxmox VE host
+# Set up restic-pve on a Proxmox VE host
 
-This page is for an admin who sets up `restic-pve` on a Proxmox VE host for the first time. It
-takes about five minutes.
+For an admin who puts `restic-pve` on a Proxmox VE host for the first time. It takes about five
+minutes, and every step can be undone with `restic-pve uninstall`.
 
-## What it does
+## What it does on the host
 
-`restic-pve` lets one backup machine copy your virtual machines off this Proxmox VE host. The
-backup machine logs in over SSH with one key, and that key can do only one thing: ask
-`restic-pve` for a copy of a guest you allowed. A running guest keeps running while it is copied.
-The tool checks itself for updates once a day and installs only releases that are signed.
+`restic-pve` lets one backup machine copy your virtual machines off this host. The backup
+machine logs in over SSH with one key, and that key can do one thing: ask `restic-pve` for an
+image of a guest you allowed. A running guest keeps running while it is copied. Once a day the
+tool checks for a newer release and installs it only when it is signed.
 
-## What it does not do
+It does not store backups, keep old versions or restore anything; the backup machine does that.
+The backup machine gets no shell, no root access and no access to guests you did not tick. Your
+guests, storages, vzdump jobs and Proxmox settings stay as they are.
 
-It does not store backups, keep old versions or restore anything; the backup machine does that. It
-does not give the backup machine a shell, root access or access to guests you did not tick. It does
-not change your guests, storages or Proxmox settings.
-
-## What ends up on the host
-
-- the program `/usr/local/sbin/restic-pve`
-- one user, `restic-backup`, whose password is locked; it can only log in with the key
-- one key entry in `/home/restic-backup/.ssh/authorized_keys`, accepted only from the backup machine
-- one sudoers file, `/etc/sudoers.d/restic-pve`, that lets this user run `restic-pve request` and
-  nothing else
-- one settings file, `/etc/restic-pve.conf`
-- the daily update timer, `restic-pve-update.timer`, with its service
-
-`restic-pve uninstall` removes all of it.
+What it writes, and how to remove it: [host.md](host.md).
 
 ## Before you start
 
-You need two values from the backup machine. Run `./setup.sh --proxmox` there; it prints both:
+You need two values from the backup machine:
 
-1. the **address** of the backup machine, for example `192.0.2.10`
-2. its **public key**, one line that starts with `ssh-ed25519`, for example
-   `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...`. Copy the whole line. It is not a secret.
+1. its address, for example `192.0.2.10`;
+2. its public key, one line that starts with `ssh-ed25519`, for example
+   `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...`. Copy the whole line. A public key is not a secret.
+
+On a backup machine that runs the control code, `./setup.sh --proxmox` prints both. That command
+belongs to the control code, which is not published yet (see the
+[README](../README.md#state-and-roadmap)); the form names it because that is where the values come
+from today.
 
 You also need a root shell on the Proxmox VE host.
 
 ## Install
 
-Paste this one line into the root shell on the Proxmox VE host:
+Paste this line into the root shell on the Proxmox VE host:
 
 ```
 curl -fsSLo /usr/local/sbin/restic-pve https://github.com/norandom/restic-pve/releases/latest/download/restic-pve-linux-amd64 && chmod 755 /usr/local/sbin/restic-pve && restic-pve install
 ```
 
-A form opens. It fills the terminal: a blue screen with a grey bar on top that says which step
-you are on, a box with the explanation and the field or list, two small boxes below it
-(**Progress**: how far you are; **Help**: an example or the rule for the current field) and a
-grey bar at the bottom with the keys. It has six screens. On every screen:
+To check the download before you run it, see [host.md](host.md#check-a-download).
 
-- **Enter** goes on (when the value is valid; if not, the reason shows in the Help box and you stay)
-- **Esc** (or Shift-Tab) goes one screen back; what you entered is kept
-- **Ctrl-C** cancels; nothing is changed
+A form opens and fills the terminal. The grey bar on top says which step you are on. The main box
+has the explanation and the field or list. Below it, Progress shows how far you are and Help
+shows an example or the rule for the current field. The grey bar at the bottom lists the keys.
+There are five steps and a summary. On every screen:
 
-Grey text in an empty field is only an example. It is not used as a value. The yellow bar shows
-where you are in a list.
+- Enter goes on when the value is valid; otherwise the rule shows in the Help box and you stay.
+- Esc (or Shift-Tab) goes one screen back and keeps what you entered.
+- Ctrl-C cancels, and nothing is changed.
+
+Grey text in an empty field is only an example and is never used as the value. The yellow bar
+shows where you are in a list.
 
 ### 1. Backup machine address
 
-```
- restic-pve install · step 1 of 5: Backup machine address         Ctrl-C=Cancel
- ┌────────────────────────── Backup machine address ──────────────────────────┐
- │ Type the IP address of the backup machine: the machine that runs the       │
- │ backups and keeps them. Only this address may log in with the backup key.  │
- │ Run ./setup.sh --proxmox on the backup machine; it prints this address.    │
- │                                                                            │
- │ > 192.0.2.10                                                               │
- │                                                                            │
- └────────────────────────────────────────────────────────────────────────────┘
- ┌───────────── Progress ─────────────┐ ┌─────────────── Help ────────────────┐
- │ Step 1 of 5                     0% │ │ Example: 192.0.2.10                 │
- │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ │                                     │
- │       Backup machine address       │ │                                     │
- │         Proxmox host setup         │ │                                     │
- └────────────────────────────────────┘ └─────────────────────────────────────┘
-Enter continue · Esc back · Ctrl-U clear                           │ restic-pve
-```
+![Install step 1: the backup machine address, with the grey example 192.0.2.10 in the empty field](img/install-address.png)
 
-Type the address that `./setup.sh --proxmox` printed. Backspace deletes, Ctrl-U clears the field.
-
-The next screens look the same; below is only what their main box shows.
+Type the address of the backup machine. Backspace deletes, Ctrl-U clears the field.
 
 ### 2. Public key
 
-```
- ┌──────────────────────────────── Public key ────────────────────────────────┐
- │ Paste the whole public key line of the backup machine. It starts with      │
- │ ssh-ed25519 and is printed by ./setup.sh --proxmox on the backup machine.  │
- │ A public key is not a secret.                                              │
- │                                                                            │
- │ > ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...                                 │
-```
+![Install step 2: a key that is too short was refused, and the Help box shows the rule in red](img/install-key-refused.png)
 
-Paste the whole line, including `ssh-ed25519`. If the line you copied ends with a line break,
-pasting it also presses Enter. A long key shows only its end; that is fine.
+Paste the whole line, including `ssh-ed25519`. If the copied line ends with a line break, pasting
+it also presses Enter. A long key shows only its end. In the picture the pasted value is not a
+real key, so the Help box shows the rule and the form stays on this step.
 
 ### 3. Guests
 
-```
- ┌────────────────────────────────── Guests ──────────────────────────────────┐
- │ Tick the virtual machines to back up. The backup machine can read only the │
- │ ticked ones.                                                               │
- │                                                                            │
- │       NUMBER     NAME       STATUS                                         │
- │                                                                            │
- │ ► [x] 100        web        running                                        │
- │   [ ] 101        db         stopped                                        │
-```
+![Install step 3: the guest list from qm list, two guests ticked, the Help box counts them](img/install-guests.png)
 
-Move with the arrow keys (or j and k), tick or untick with Space, then press Enter. Tick at
-least one. A long list scrolls. The Help box counts the ticked guests.
+Move with the arrow keys (or j and k), tick or untick with Space, then press Enter. Tick at least
+one. A long list scrolls, and the Help box counts the ticked guests.
 
 ### 4. Fleecing storage
+
+No capture of this screen yet; its main box looks like this:
 
 ```
  ┌───────────────────────────── Fleecing storage ─────────────────────────────┐
@@ -127,49 +90,22 @@ least one. A long list scrolls. The Help box counts the ticked guests.
  │   ( ) local-lvm  lvmthin          819                                      │
 ```
 
-Move to the storage and press Enter.
+Move to the storage and press Enter. The list holds the active storages of `pvesm status`.
 
 ### 5. Limits
 
-```
- ┌────────────────────────────────── Limits ──────────────────────────────────┐
- │ These limits protect this host while a backup runs. The current values     │
- │ suit most hosts.                                                           │
- │                                                                            │
- │   Start a backup only with       32 GiB                                    │
- │   Stop a running backup below    8 GiB                                     │
- │   Read limit                     40 MiB/s                                  │
- │   Backups at the same time       1                                         │
- │                                                                            │
- │ ► Keep these (recommended)                                                 │
- │   Change                                                                   │
-```
+![Install step 5: the four limits with Keep these (recommended) selected](img/install-limits.png)
 
-Press Enter to keep them. "Change" shows the four values as fields; the Help box says the allowed
-range of the field you are on. Move between them with the arrow keys and press Enter after each.
+Press Enter to keep them. Change shows the four values as fields, and the Help box gives the
+allowed range of the field you are on. Move between them with the arrow keys and press Enter
+after each.
 
-### 6. Summary
+### Summary
 
-```
- ┌────────────────────────────────── Summary ─────────────────────────────────┐
- │ Install writes these values, a backup user with its key, a sudoers file,   │
- │ the binary and a daily update timer. Nothing changes before you choose     │
- │ Install.                                                                   │
- │                                                                            │
- │ Backup machine      192.0.2.10                                             │
- │ Public key          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFBQ...FBQUFBQUFB │
- │ Guests              100 (web)                                              │
- │ Fleecing storage    local                                                  │
- │ Limits              start with 32 GiB free                                 │
- │                     stop below 8 GiB free                                  │
- │                     read 40 MiB/s, 1 at a time                             │
- │ Backup user         restic-backup                                          │
- │                                                                            │
- │ [ Install ]  [ Back ]  [ Cancel ]                                          │
-```
+![Install summary: all values, the backup user restic-backup, and the Install button selected](img/install-summary.png)
 
-Check the values. **Install** is selected (yellow); press Enter to install. Left and Right (or
-Tab) move to Back or Cancel.
+Check the values. Install is selected (yellow); Enter installs. Left and Right (or Tab) move to
+Back or Cancel.
 
 ## What success looks like
 
@@ -182,32 +118,22 @@ restic-pve v1.2.3 ready: user restic-backup, key accepted from 192.0.2.10, guest
 This host updates restic-pve daily to the latest signed release (restic-pve-update.timer).
 ```
 
-Now tell the backup machine to try it (see its own instructions).
+The backup machine can now ask for images of the ticked guests.
+
+## Without the form
+
+`restic-pve install --plain`, or a terminal smaller than 60 by 20, asks the same questions line by
+line, with an example for the address and the key. Enter takes the value in brackets. The guests
+are typed as VM numbers separated by spaces or commas. At the end it asks
+`Install with these values? [y/N]`; only `y` installs.
 
 ## Later
 
-- **Change a value** (another guest, a new key, other limits): run `restic-pve install` again.
-  The form starts with the current values filled in; change what you need and press Enter on the
-  rest.
-- **Update**: automatic, once a day. To update now: `restic-pve update`.
-- **Remove**: `restic-pve uninstall`.
+- To change a value (another guest, a new key, other limits), run `restic-pve install` again. The
+  form starts with the current values; change what you need and press Enter on the rest.
+- Updates run once a day by themselves. To update now: `restic-pve update`.
+- To remove everything: `restic-pve uninstall`.
 
-## If something goes wrong
+When a message appears that you do not understand: [troubleshooting.md](troubleshooting.md).
 
-- **"this is not a Proxmox VE host"**: run it on the Proxmox VE host itself, as root, not inside
-  a guest.
-- **No form, only questions, or the form looks broken**: the form needs a real terminal of at
-  least 60 by 20 characters. Without one the tool asks the same questions line by line. To get
-  the line-by-line questions on purpose, run `restic-pve install --plain`; it shows an example
-  with each question and asks `Install with these values? [y/N]` at the end, where only `y`
-  installs. Frames made of `+`, `-` and `|` instead of thin lines mean the terminal's language
-  setting is not UTF-8 (for example `LANG=C`); the form works the same. To turn the colours off,
-  set `NO_COLOR=1`.
-- **The key is rejected**: copy the whole line again, starting with `ssh-ed25519`. Keys of
-  other types (for example `ssh-rsa`) are not accepted.
-- **A guest is missing from the list**: the list comes from `qm list` on this host. A guest on
-  another node of a cluster must be set up on that node.
-- **A storage is missing from the list**: only active storages from `pvesm status` are shown.
-  Check `pvesm status`; an inactive storage must be fixed in Proxmox first.
-- **The daily update failed**: `systemctl status restic-pve-update.service` shows the reason.
-  A failed update leaves the installed program as it was.
+[Back to the index](README.md)
