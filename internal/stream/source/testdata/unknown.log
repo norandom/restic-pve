@@ -1,0 +1,8 @@
+INFO: Starting Backup of VM 100 (qemu)
+INFO: status = running
+INFO: VM Name: example
+INFO: backup mode: snapshot
+INFO: creating vzdump archive '-'
+INFO: drive-scsi0: attaching fleecing image fast-ssd:vm-100-fleece-0 to QEMU
+INFO: started backup task 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+INFO: Finished Backup of VM 100 (00:03:11)

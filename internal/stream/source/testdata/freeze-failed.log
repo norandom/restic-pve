@@ -1,0 +1,12 @@
+INFO: Starting Backup of VM 100 (qemu)
+INFO: status = running
+INFO: VM Name: example
+INFO: backup mode: snapshot
+INFO: creating vzdump archive '-'
+INFO: drive-scsi0: attaching fleecing image fast-ssd:vm-100-fleece-0 to QEMU
+INFO: issuing guest-agent 'fs-freeze' command
+ERROR: VM 100 qmp command 'guest-fsfreeze-freeze' failed - got timeout
+INFO: issuing guest-agent 'fs-thaw' command
+INFO: started backup task 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+INFO: resuming VM again
+INFO: Finished Backup of VM 100 (00:03:11)

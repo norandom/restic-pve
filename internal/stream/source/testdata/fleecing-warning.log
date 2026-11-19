@@ -1,0 +1,10 @@
+INFO: Starting Backup of VM 100 (qemu)
+INFO: status = running
+INFO: VM Name: example
+INFO: backup mode: snapshot
+INFO: creating vzdump archive '-'
+WARN: drive-scsi0: fleecing not supported for this QEMU version - continuing without fleecing
+INFO: issuing guest-agent 'fs-freeze' command
+INFO: issuing guest-agent 'fs-thaw' command
+INFO: started backup task 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+INFO: Finished Backup of VM 100 (00:03:11)

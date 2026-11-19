@@ -217,7 +217,7 @@ Reading...                                                          │ restic-p
 ### The live view of a real backup
 
 The packed view is also the live view of a real guest backup on the backup machine
-(`./status.sh --watch` there, which runs `vmastream watch`). It is drawn by the same code as the
+(`restic-pve watch` there). It is drawn by the same code as the
 demo (package `blockview`), but every change on the screen comes from a real event of the
 backup. Nothing is animated: when the backup waits, the picture waits.
 
@@ -250,7 +250,7 @@ names the command that starts one.
 
 #### The state file (format version 1)
 
-`vmastream backup --view-dir DIR` writes `DIR/live` at most twice a second (write to a temporary
+`restic-pve stream backup --view-dir DIR` writes `DIR/live` at most twice a second (write to a temporary
 file, then rename) and, after a complete stream, a copy as `DIR/vm-<vmid>.last`. Plain text, one
 `key value` line per field, about 4.5 KB:
 
@@ -277,7 +277,8 @@ Map characters: `?` not read yet (or partly read, no data so far), `.` empty (ev
 arrived, none held data), `o` holds data not all in the stream yet (or not complete), `#` complete
 and all its data in the stream. Cell `c` covers the clusters from `ceil(c*N/cells)` to the next
 cell's first, `N` the clusters of all disks. A reader rejects a file whose first line is not
-`vmastream-view 1`.
+`vmastream-view 1` (the format keeps the name of the program that introduced it).
+`restic-pve watch` reads `DIR` = `<RESTIC_PVE_STATE>/guests/view`.
 
 The writer never affects the backup: the stream only counts into its own arrays and stores a
 snapshot pointer; a separate goroutine writes the file; on the first write error it logs one

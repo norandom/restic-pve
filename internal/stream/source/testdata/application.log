@@ -1,0 +1,21 @@
+INFO: starting new backup job: vzdump 100 --mode snapshot --stdout 1 --compress 0 --ionice 7 --fleecing enabled=1,storage=fast-ssd --performance max-workers=1
+INFO: Starting Backup of VM 100 (qemu)
+INFO: Backup started at 2026-10-11 02:00:00
+INFO: status = running
+INFO: VM Name: example
+INFO: include disk 'scsi0' 'fast-ssd:vm-100-disk-0' 32G
+INFO: backup mode: snapshot
+INFO: ionice priority: 7
+INFO: creating vzdump archive '-'
+INFO: drive-scsi0: attaching fleecing image fast-ssd:vm-100-fleece-0 to QEMU
+INFO: issuing guest-agent 'fs-freeze' command
+INFO: issuing guest-agent 'fs-thaw' command
+INFO: started backup task 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+INFO: resuming VM again
+INFO:   1% (512.0 MiB of 32.0 GiB) in 3s, read: 170.7 MiB/s, write: 170.7 MiB/s
+INFO: 100% (32.0 GiB of 32.0 GiB) in 3m 10s, read: 172.4 MiB/s, write: 98.1 MiB/s
+INFO: backup is sparse: 20.1 GiB (62%) total zero data
+INFO: transferred 32.00 GiB in 190 seconds (172.4 MiB/s)
+INFO: Finished Backup of VM 100 (00:03:11)
+INFO: Backup finished at 2026-10-11 02:03:11
+INFO: Backup job finished successfully

@@ -1,10 +1,23 @@
-// Command restic-pve is the one binary of the backup identity on a Proxmox VE host.
+// Command restic-pve is the one binary of both machines: the backup identity on a Proxmox VE
+// host (host role) and the stream program of the backup machine (backup role). Each command
+// belongs to one role; the role guard (internal/role) refuses a command of the other role
+// before it does anything.
+//
+// Host role:
 //
 //	restic-pve request <ping|info <vmid>|dump <vmid>>   forced command (through sudo)
 //	restic-pve install [--plain]                        root: asks for the site values, installs or changes the identity
 //	restic-pve update                                   root: replace itself with the latest signed release
 //	restic-pve uninstall                                root: remove the identity, its files and the binary
-//	restic-pve version                                  print the version
+//
+// Backup role (RESTIC_PVE_STATE set):
+//
+//	restic-pve stream <backup|verify|to-vma|to-raw> ... the stream program (the former vmastream)
+//	restic-pve watch [--once]                           block view of the guest backup that runs now
+//
+// Both:
+//
+//	restic-pve version                                  print the version (stdout); the role on stderr, only on a terminal
 //
 // Not in the usage line: restic-pve demo [pack] [full|incremental] shows the block map of the
 // backup view with a simulated run, to judge the retro look; it reads no data. Without "pack"
@@ -22,8 +35,10 @@ import (
 	"github.com/norandom/restic-pve/internal/demo"
 	"github.com/norandom/restic-pve/internal/install"
 	"github.com/norandom/restic-pve/internal/relkeys"
+	"github.com/norandom/restic-pve/internal/role"
 	"github.com/norandom/restic-pve/internal/update"
 	"github.com/norandom/restic-pve/internal/wrapper"
+	"golang.org/x/term"
 )
 
 // Set at link time with -ldflags "-X main.version=... -X main.releaseRepo=...".
@@ -32,22 +47,60 @@ var (
 	releaseRepo = "norandom/restic-pve"
 )
 
-const usage = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install [--plain] | update | uninstall | version"
+const (
+	hostUsage   = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install [--plain] | update | uninstall | version"
+	backupUsage = "usage: restic-pve stream <backup|verify|to-vma|to-raw> [flags] | watch [--once] | version"
+)
 
-func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+// roles is the command table: the role of each command. A command not listed (version, demo)
+// runs on both machines.
+var roles = map[string]role.Role{
+	"request": role.Host, "install": role.Host, "update": role.Host, "uninstall": role.Host,
+	"stream": role.Backup, "watch": role.Backup,
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+// env is what a command sees of the machine.
+type env struct {
+	stdin          io.Reader
+	stdout, stderr io.Writer
+	role           role.Role
+	stderrTTY      bool // the role line of version goes only to a terminal
+	tty            bool // stdin and stdout are a terminal: watch draws its screen
+	getenv         func(string) string
+}
+
+func main() {
+	os.Exit(run(os.Args[1:], env{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr,
+		role: role.Detect(os.Stat, os.Getenv), stderrTTY: term.IsTerminal(2),
+		tty: term.IsTerminal(0) && term.IsTerminal(1), getenv: os.Getenv}))
+}
+
+func run(args []string, e env) int {
+	stdout, stderr := e.stdout, e.stderr
+	usage := hostUsage
+	if e.role == role.Backup {
+		usage = backupUsage
+	}
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, usage)
 		return 64
 	}
+	if err := role.Require(args[0], roles[args[0]], e.role); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err.(*role.Error).Code
+	}
 	switch {
+	case args[0] == "stream":
+		return cmdStream(args[1:], e)
+	case args[0] == "watch":
+		return cmdWatch(args[1:], e)
 	case args[0] == "request":
 		return wrapper.Default(version).Run(args[1:])
 	case args[0] == "version" && len(args) == 1:
-		fmt.Fprintln(stdout, version)
+		fmt.Fprintln(stdout, version) // byte for byte: released hosts compare it with VERSION
+		if e.stderrTTY {
+			fmt.Fprintln(stderr, "role:", roleLine(e.role))
+		}
 		return 0
 	case args[0] == "install" && (len(args) == 1 || len(args) == 2 && args[1] == "--plain"):
 		exe, err := executable()
@@ -86,12 +139,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 64
 }
 
-// executable returns the path of the running binary with symlinks resolved.
+func roleLine(r role.Role) string {
+	if r == role.None {
+		return "none found (no /etc/pve, no /etc/restic-pve.conf, " + role.StateEnv + " not set)"
+	}
+	return r.Machine()
+}
+
 func demoArgs(args []string) bool {
 	_, _, ok := demo.Args(args)
 	return ok
 }
 
+// executable returns the path of the running binary with symlinks resolved.
 func executable() (string, error) {
 	exe, err := os.Executable()
 	if err == nil {
