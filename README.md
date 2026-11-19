@@ -76,11 +76,37 @@ Backup machine:
 | Command | Who | What |
 |---|---|---|
 | `stream backup\|verify\|to-vma\|to-raw` | the backup machine's control code | the stream program, see [Stream contract](#stream-contract) |
-| `watch [--once]` | the admin | the block view of the guest backup that runs now; one plain line without a terminal or with `--once` |
+| `status [--plain]` | the admin, scripts | is there a recent copy away from the site, have I seen a restore work, what runs now and next; plain lines and an exit code without a terminal |
+| `keys [--plain]` | the admin | every key of this machine, what it does, where it is, which one needs a copy away; `p` proves the password copy |
+| `space [--plain\|--check]` | the admin; `--check` the control code | storage space, backup sizes, keep rules, the warning rule; `--check` prints one line |
+| `watch [--once]` | the admin | the guest backup that runs now as the block view, or the progress of a local source; one plain line without a terminal or with `--once` |
 | `version` | anyone | prints the version |
 
+What the screens read (they never change anything by looking; the storage is read at most every
+six hours, or on `r`, at nice 19 and idle I/O priority; while a backup runs an existing cache is
+shown and the read waits):
+
+| Variable | Read by | Meaning, example |
+|---|---|---|
+| `RESTIC_PVE_STATE` | all | state root: `records.json`, `status.json`, `jobs/<name>.json` and `.lock`, `run.lock`, `guests/` for the guest profile, `status-cache.json` (written), `password-escrow-confirmed` (written by the proof); `/state` |
+| `BACKUP_CONFIG` | status, keys, space | `backup.toml`: `[repository] base`, `[[source]]`, `[retention]`, `keep_last`, `[alerts] stale_days`, `[schedule]`; `/app/config/backup.toml` |
+| `RESTIC_PASSWORD` | status, space, keys | the password in use, passed to restic in its environment only |
+| `RESTIC_REPOSITORY_BASE` | status, keys, space | overrides `[repository] base` |
+| `RCLONE_CONFIG` | keys (section name only), restic and rclone children | the rclone config |
+| `RESTIC_PVE_KEYS` | keys | folder with `ssh/id_ed25519` and `guest-ssh/id_ed25519` (checked by existence); `/config` |
+| `RESTIC_PVE_START_HINT` | status, watch | the start command in the actions; `'./backup.sh <source>'` |
+| `DISCORD_WEBHOOK_URL`, `RUNNER_TOKEN`, `OPENOBSERVE_USER`, `OPENOBSERVE_PASSWORD` | status, keys | set or not set only; values are never read into output |
+| `TERM`, `NO_COLOR`, `TZ` | all screens | `TERM=dumb` gives plain lines, `NO_COLOR` no colours, times in `TZ` |
+
+`status --plain` prints one fact per line, words separated by two spaces (`copy <instance>
+yes|no|unknown <age> ...`, `restore-test`, `drill`, `running`, `last-job`, `next`, `space`,
+`updates`, `alerts`, `password-proof`, `problem`, `verdict safe|not-safe|unknown`). Exit codes:
+0 every source and guest is safe, 1 at least one is not safe or not known, 64 usage, 78 a
+variable is missing or the config cannot be read. `space --check`: 0 no warning, 1 warning
+(free below twice the largest recent run, or below a tenth of the total), 2 not known.
+
 `watch` reads `<RESTIC_PVE_STATE>/guests/view` (the folder `stream backup --view-dir` writes)
-and never writes. When no backup runs it shows `RESTIC_PVE_START_HINT`, the command that starts
+and `<RESTIC_PVE_STATE>/status.json` for a local source, and never writes. When no backup runs it shows `RESTIC_PVE_START_HINT`, the command that starts
 one on this machine (for example `./backup.sh <source>`); without that variable it stops with
 exit 78 and names it. It closes itself ten minutes after the last running backup; leaving it
 never stops a backup. `NO_COLOR` keeps the layout without colours.
@@ -375,8 +401,9 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=vX.Y.
 ```
 
 Size of the release binary (linux/amd64, `golang:1.27.1-alpine3.24`, the workflow's flags,
-static, measured 2026-11-19): 8,544,380 bytes (8.1 MiB) with both roles; the host role alone
-was 7,471,228 bytes (7.1 MiB). The gate is 16 MiB; the self-update accepts at most 64 MiB.
+static, measured 2026-11-19): 9,072,764 bytes (8.7 MiB) with both roles and the status, keys
+and space screens; 8,544,380 bytes before those screens, and the host role alone was
+7,471,228 bytes (7.1 MiB). The gate is 16 MiB; the self-update accepts at most 64 MiB.
 
 The wrapper tests run the test binary as the wrapper (helper process) against
 stub `qm`, `pvesm`, `pveversion` and `vzdump` scripts in a temp directory. They

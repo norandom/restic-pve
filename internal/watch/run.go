@@ -3,6 +3,7 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -22,7 +23,8 @@ var ErrIdle = errors.New("no running backup")
 
 // Options configure a viewer.
 type Options struct {
-	Dir   string
+	Dir   string           // the guest view folder
+	State string           // the state root: the local sources' status.json; "" leaves them out
 	Words Words            // title and start command
 	Color bool             // false: NO_COLOR
 	Poll  time.Duration    // default Poll
@@ -53,6 +55,7 @@ func Run(screen tcell.Screen, o Options) error {
 	defer tick.Stop()
 
 	var sp Speed
+	var lsp LocalSpeed
 	var watched time.Time // start of the run this viewer saw running
 	lastActive := o.Now() // last time a backup was seen running
 	var lastKey string    // what the last drawn frame showed
@@ -60,15 +63,25 @@ func Run(screen tcell.Screen, o Options) error {
 	// must not send the same screen four times a second. force redraws regardless (resize).
 	draw := func(force bool) {
 		snap := Load(o.Dir)
+		lc := LoadLocal(o.State)
+		lsp.Add(lc.S)
 		now := o.Now()
 		key := "none"
+		if lc.S != nil {
+			key = fmt.Sprint("local", lc.Running, lc.S.RunStatus, lc.S.Updated, lc.S.CurrentUnit)
+			if lc.Running {
+				lastActive = now
+			}
+		}
+		guestRunning := false
 		if s := snap.Live; s != nil {
 			sp.Add(s)
 			if s.Status == blockmap.Running && now.Sub(s.Updated) <= Stale {
 				watched = s.Started
 				lastActive = now
+				guestRunning = true
 			}
-			key = fmt.Sprint(s.Status, s.Started.UnixNano(), s.Updated.UnixNano())
+			key = fmt.Sprint(key, s.Status, s.Started.UnixNano(), s.Updated.UnixNano())
 		}
 		cols, rows := screen.Size()
 		// notices that depend on the clock (stopped updating, waiting) refresh every 5 s
@@ -82,8 +95,17 @@ func Run(screen tcell.Screen, o Options) error {
 		lastKey = key
 		seen := snap.Live != nil && !watched.IsZero() && snap.Live.Started.Equal(watched)
 		f := Build(snap, &sp, seen, now, cols, rows, o.Words)
+		switch {
+		case !guestRunning && lc.Running:
+			f = BuildLocal(lc, &lsp, now, o.Words)
+		case f.Notice != nil && lc.S != nil && !guestRunning && f.Notice.Heading == "No backup running":
+			// what the local sources did last, before the start hint
+			n := *f.Notice
+			n.Lines = append(append(append([]string{}, n.Lines[:len(n.Lines)-1]...), upperFirst(localEnd(lc))+"."), n.Lines[len(n.Lines)-1])
+			f.Notice = &n
+		}
 		if cols < 60 || rows < 20 {
-			small(screen, t, Line(snap, now, o.Words.Start))
+			small(screen, t, LineAll(snap, lc, &lsp, now, o.Words.Start))
 		} else {
 			f.Draw(screen, t)
 		}
@@ -129,4 +151,11 @@ func small(screen tcell.Screen, t retro.Theme, line string) {
 		retro.Put(screen, 0, i, cols, l, t.Base)
 	}
 	screen.HideCursor()
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

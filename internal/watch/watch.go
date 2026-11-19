@@ -174,12 +174,15 @@ func Input(s, prior *blockmap.State) blockview.Input {
 type Frame struct {
 	Screen *blockview.Screen
 	Notice *blockview.Notice
+	Local  *LocalScreen
 }
 
 // Draw draws the frame.
 func (f Frame) Draw(screen tcell.Screen, t retro.Theme) {
 	if f.Screen != nil {
 		f.Screen.Draw(screen, t)
+	} else if f.Local != nil {
+		f.Local.Draw(screen, t)
 	} else if f.Notice != nil {
 		f.Notice.Draw(screen, t)
 	}
@@ -201,12 +204,12 @@ func Build(snap Snapshot, sp *Speed, watched bool, now time.Time, cols, rows int
 			"The state file of the guest backup cannot be read: "+snap.Err.Error()+".",
 			"The view tries again every second. The backup itself is not affected.")
 	case s == nil:
-		return w.notice("No backup running", "Waiting for a guest backup...",
-			"No guest backup is running on this machine right now.",
+		return w.notice("No backup running", "Waiting for a backup...",
+			"No backup is running on this machine right now.",
 			"Start one with: "+w.Start+".",
-			"This view stays open and shows the next guest backup when it starts.")
+			"This view stays open and shows the next backup when it starts.")
 	case s.Status == blockmap.Running && now.Sub(s.Updated) > Stale:
-		return w.notice("The backup stopped reporting", "Waiting for a guest backup...",
+		return w.notice("The backup stopped reporting", "Waiting for a backup...",
 			fmt.Sprintf("%s: the backup stopped updating its view at %s, without a result.", guestName(s), s.Updated.Format("15:04:05")),
 			"It was probably stopped; "+logHint+".",
 			"Start a new one with: "+w.Start+".")
@@ -215,9 +218,9 @@ func Build(snap Snapshot, sp *Speed, watched bool, now time.Time, cols, rows int
 		if s.Status == blockmap.Failed {
 			how = "failed: " + s.Message
 		}
-		return w.notice("No backup running", "Waiting for a guest backup...",
-			"No guest backup is running on this machine right now.",
-			fmt.Sprintf("The last one, %s, %s (at %s, after %s).", guestName(s), how,
+		return w.notice("No backup running", "Waiting for a backup...",
+			"No backup is running on this machine right now.",
+			fmt.Sprintf("The last guest backup, %s, %s (at %s, after %s).", guestName(s), how,
 				s.Updated.Format("2006-01-02 15:04"), retro.Elapsed(elapsed(s, now))),
 			"Start one with: "+w.Start+". This view stays open and shows it.")
 	case len(s.Map) == 0:
@@ -269,7 +272,7 @@ func Line(snap Snapshot, now time.Time, start string) string {
 	case snap.Err != nil:
 		return "cannot read the guest backup's state: " + snap.Err.Error()
 	case s == nil:
-		return "no guest backup is running; start one with " + start
+		return "no backup is running; start one with " + start
 	case s.Status == blockmap.Running && now.Sub(s.Updated) > Stale:
 		return fmt.Sprintf("no guest backup is running; %s stopped reporting at %s without a result ("+logHint+")",
 			lowerGuest(s), s.Updated.Format("15:04:05"))
@@ -291,4 +294,20 @@ func lowerGuest(s *blockmap.State) string {
 		return fmt.Sprintf("guest %d (%s)", s.VMID, s.Name)
 	}
 	return fmt.Sprintf("guest %d", s.VMID)
+}
+
+// LineAll is the plain line of watch: the guest backup that runs, else the local one, else
+// what ran last.
+func LineAll(snap Snapshot, lc Local, sp *LocalSpeed, now time.Time, start string) string {
+	g := snap.Live
+	guestRunning := g != nil && g.Status == blockmap.Running && now.Sub(g.Updated) <= Stale
+	switch {
+	case guestRunning || snap.Err != nil:
+		return Line(snap, now, start)
+	case lc.Running:
+		return LocalLine(lc, sp, now)
+	case lc.S != nil:
+		return Line(snap, now, start) + "; " + localEnd(lc)
+	}
+	return Line(snap, now, start)
 }

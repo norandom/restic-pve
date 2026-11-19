@@ -167,7 +167,7 @@ func TestFinishedAndFailed(t *testing.T) {
 	}
 	// a run that ended before the viewer started: a sentence, not an old map
 	l = draw(t, Snapshot{Live: s}, false, s.Updated.Add(time.Hour))
-	want(t, l, "No guest backup is running", "Guest 100 (web),", "00:31:12", "./start <guest>")
+	want(t, l, "No backup is running", "Guest 100 (web),", "00:31:12", "./start <guest>")
 
 	f := state()
 	f.Status, f.Message = blockmap.Failed, "stream cut: unexpected EOF"
@@ -181,8 +181,8 @@ func TestFinishedAndFailed(t *testing.T) {
 func TestNoBackupStaleAndStarting(t *testing.T) {
 	l := draw(t, Snapshot{}, false, t0)
 	want(t, l, "restic-pve v9.9.9 · backup machine · watch", "No backup running",
-		"No guest backup is running on this machine right now.", "Start one with: ./start <guest>.",
-		"Waiting for a guest backup...")
+		"No backup is running on this machine right now.", "Start one with: ./start <guest>.",
+		"Waiting for a backup...")
 	s := state()
 	l = draw(t, Snapshot{Live: s}, true, s.Updated.Add(Stale+time.Second))
 	want(t, l, "stopped updating", "14:01:23", "probably stopped; its job's log says why")
@@ -203,7 +203,7 @@ func TestLine(t *testing.T) {
 		now  time.Time
 		want string
 	}{
-		{Snapshot{}, t0, "no guest backup is running; start one with ./start <guest>"},
+		{Snapshot{}, t0, "no backup is running; start one with ./start <guest>"},
 		{Snapshot{Live: s}, s.Updated, "guest 100 (web): reading 22% 3.6 GiB/16.0 GiB, 45 MiB/s on average, 1.0 GiB of data in the backup stream, elapsed 00:01:23"},
 		{Snapshot{Live: s}, s.Updated.Add(time.Minute), "stopped reporting at 14:01:23"},
 	} {

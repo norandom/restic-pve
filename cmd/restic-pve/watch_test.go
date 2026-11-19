@@ -43,7 +43,7 @@ func TestWatchPlain(t *testing.T) {
 		if code := run(args, backupMachine(vars, &out, &errb)); code != 0 || errb.Len() != 0 {
 			t.Fatalf("%q: %d %q", args, code, errb.String())
 		}
-		if out.String() != "no guest backup is running; start one with ./start <guest>\n" {
+		if out.String() != "no backup is running; start one with ./start <guest>\n" {
 			t.Errorf("%q: %q", args, out.String())
 		}
 		if listing(t, state) != before {

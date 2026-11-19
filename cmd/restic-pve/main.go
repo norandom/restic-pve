@@ -12,8 +12,11 @@
 //
 // Backup role (RESTIC_PVE_STATE set):
 //
+//	restic-pve status [--plain]                         is there a recent copy away from the site? (exit 0: all safe)
+//	restic-pve keys [--plain]                           every key, and the proof of the password copy
+//	restic-pve space [--plain|--check]                  storage space; --check: one line, exit 0 ok, 1 low, 2 unknown
+//	restic-pve watch [--once]                           the backup that runs now: guest block view or local progress
 //	restic-pve stream <backup|verify|to-vma|to-raw> ... the stream program (the former vmastream)
-//	restic-pve watch [--once]                           block view of the guest backup that runs now
 //
 // Both:
 //
@@ -32,7 +35,9 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/norandom/restic-pve/internal/demo"
+	"github.com/norandom/restic-pve/internal/facts"
 	"github.com/norandom/restic-pve/internal/install"
 	"github.com/norandom/restic-pve/internal/relkeys"
 	"github.com/norandom/restic-pve/internal/role"
@@ -49,14 +54,15 @@ var (
 
 const (
 	hostUsage   = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install [--plain] | update | uninstall | version"
-	backupUsage = "usage: restic-pve stream <backup|verify|to-vma|to-raw> [flags] | watch [--once] | version"
+	backupUsage = "usage: restic-pve status [--plain] | keys [--plain] | space [--plain|--check] | watch [--once] | " +
+		"stream <backup|verify|to-vma|to-raw> [flags] | version"
 )
 
 // roles is the command table: the role of each command. A command not listed (version, demo)
 // runs on both machines.
 var roles = map[string]role.Role{
 	"request": role.Host, "install": role.Host, "update": role.Host, "uninstall": role.Host,
-	"stream": role.Backup, "watch": role.Backup,
+	"stream": role.Backup, "watch": role.Backup, "status": role.Backup, "keys": role.Backup, "space": role.Backup,
 }
 
 // env is what a command sees of the machine.
@@ -67,12 +73,17 @@ type env struct {
 	stderrTTY      bool // the role line of version goes only to a terminal
 	tty            bool // stdin and stdout are a terminal: watch draws its screen
 	getenv         func(string) string
+	environ        func() []string              // the whole environment (children get an allow list of it)
+	size           func() (int, int, error)     // the terminal's columns and rows
+	runner         facts.Runner                 // restic and rclone; tests give stand-ins
+	newScreen      func() (tcell.Screen, error) // an initialised full screen
 }
 
 func main() {
 	os.Exit(run(os.Args[1:], env{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr,
 		role: role.Detect(os.Stat, os.Getenv), stderrTTY: term.IsTerminal(2),
-		tty: term.IsTerminal(0) && term.IsTerminal(1), getenv: os.Getenv}))
+		tty: term.IsTerminal(0) && term.IsTerminal(1), getenv: os.Getenv, environ: os.Environ,
+		size: func() (int, int, error) { return term.GetSize(1) }, runner: facts.Exec, newScreen: terminalScreen}))
 }
 
 func run(args []string, e env) int {
@@ -94,6 +105,12 @@ func run(args []string, e env) int {
 		return cmdStream(args[1:], e)
 	case args[0] == "watch":
 		return cmdWatch(args[1:], e)
+	case args[0] == "status":
+		return cmdStatus(args[1:], e)
+	case args[0] == "keys":
+		return cmdKeys(args[1:], e)
+	case args[0] == "space":
+		return cmdSpace(args[1:], e)
 	case args[0] == "request":
 		return wrapper.Default(version).Run(args[1:])
 	case args[0] == "version" && len(args) == 1:

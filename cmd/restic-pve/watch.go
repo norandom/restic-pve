@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/norandom/restic-pve/internal/role"
 	"github.com/norandom/restic-pve/internal/watch"
 )
@@ -17,8 +16,9 @@ import (
 const startHintEnv = "RESTIC_PVE_START_HINT"
 
 // cmdWatch is `restic-pve watch [--once]`: the block view of the guest backup that runs now,
-// read from <RESTIC_PVE_STATE>/guests/view. Without a terminal, or with --once, it prints one
-// plain line. It only reads: quitting it never stops the backup. It closes itself ten minutes
+// read from <RESTIC_PVE_STATE>/guests/view, or the progress of the local sources from
+// <RESTIC_PVE_STATE>/status.json. Without a terminal, with TERM=dumb or on a small terminal,
+// or with --once, it prints one plain line. It only reads: quitting it never stops the backup. It closes itself ten minutes
 // after the last running backup.
 func cmdWatch(args []string, e env) int {
 	fs := flag.NewFlagSet("restic-pve watch", flag.ContinueOnError)
@@ -37,22 +37,27 @@ func cmdWatch(args []string, e env) int {
 			"for example %s='./backup.sh <source>'.\n", startHintEnv, startHintEnv)
 		return 78
 	}
-	dir := filepath.Join(e.getenv(role.StateEnv), "guests", "view")
-	line := func() { fmt.Fprintln(e.stdout, watch.Line(watch.Load(dir), time.Now(), hint)) }
-	if *once || !e.tty {
+	st := e.getenv(role.StateEnv)
+	dir := filepath.Join(st, "guests", "view")
+	line := func() {
+		var sp watch.LocalSpeed
+		lc := watch.LoadLocal(st)
+		sp.Add(lc.S)
+		fmt.Fprintln(e.stdout, watch.LineAll(watch.Load(dir), lc, &sp, time.Now(), hint))
+	}
+	if *once || e.plain(false) {
 		line()
 		return 0
 	}
-	screen, err := tcell.NewScreen()
-	if err == nil {
-		err = screen.Init()
-	}
+	screen, err := e.newScreen()
 	if err != nil { // no usable terminal after all: the plain line
 		line()
 		return 0
 	}
-	err = watch.Run(screen, watch.Options{Dir: dir, Color: e.getenv("NO_COLOR") == "",
-		Words: watch.Words{Title: "restic-pve " + version + " · backup machine · watch", Start: hint}})
+	stop := restoreOnSignal(screen)
+	defer stop()
+	err = watch.Run(screen, watch.Options{Dir: dir, State: st, Color: e.getenv("NO_COLOR") == "",
+		Words: watch.Words{Title: title("watch"), Start: hint}})
 	screen.Fini()
 	if errors.Is(err, watch.ErrIdle) {
 		// closed by itself: say why and leave the last state on the normal screen
