@@ -258,12 +258,16 @@ its lock behind).
    exactly the files of `restic ls` (each piece at its size). The tree is deleted and rebuilt
    from `restic ls --json --recursive`: one sparse file per piece, size and mtime (with
    nanoseconds) as listed. With `--parent` and `--ignore-inode` restic takes every placeholder
-   from the parent without opening it. A changed-blocks run builds only on the record's base;
-   a full read takes the newest pieces snapshot as its parent when the other rules hold (it
-   reads every piece anyway and compares); after failed checks, and in a full check, it has no
-   parent: every piece then goes through restic, which hashes it again and uploads only what
-   the repository does not hold, so nothing of the base is taken on trust. The manifest of a
-   full check still names the base as its `parent`.
+   from the parent without opening it. A run has a parent only when the newest snapshot of the
+   guest is the record's base (record state `based`, no fault): a changed-blocks run, and a
+   full read in state `based` (a stopped guest, a changed disk set, size or Proxmox version, a
+   record gone or moved on, a host without `prev`, the plug-in not ready). Every other full
+   read has no parent: no base (first run, after an arm, after a probe, after a full read
+   without provider job, after the backup machine reset the record), a fault, a record state
+   set aside, a newest backup that is not the base, after failed checks, and the full read of a
+   full check. Every piece then goes through restic, which hashes it again and uploads only
+   what the repository does not hold, so nothing of a snapshot the record does not build on is
+   taken on trust. The manifest of a full check still names the base as its `parent`.
 2. A piece whose SHA-256 equals the parent's stays a placeholder and never reaches restic.
    Every other piece is staged outside the tree (zero 64 KiB clusters as holes) with the run's
    mtime, `max(now, newest parent mtime + 1 s)` in whole seconds, so it differs from its

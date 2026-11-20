@@ -30,6 +30,7 @@ const (
 	ReasonRecordGone = "record-gone"
 	ReasonCheckDue   = "check-due"
 	ReasonCleared    = "fault-cleared" // the first run after --clear-fault
+	ReasonProbed     = "probed"        // a probe from this backup machine moved Proxmox's record on
 	ReasonJobMoved   = "job-moved"     // another provider job moved Proxmox's record on
 	ReasonHostOld    = "host-old"      // the host does not say which job the record counts from
 	ReasonChecks     = "checks-failed" // the changed-blocks run failed C1-C3 (Run)
@@ -112,10 +113,11 @@ func full(run, reason, line string, expected bool) Decision {
 	return Decision{Run: run, Reason: reason, Line: line, Expected: expected}
 }
 
-// Decide chooses the run (design F2). In order: a fault, a stopped guest, no record base, a
-// newest backup that is not a usable pieces parent of the record, a changed disk set, a
-// changed Proxmox version, a changed disk size, a disk without record, a record that counts
-// from another job than the record state's, a full check due; otherwise a changed-blocks run.
+// Decide chooses the run (design F2). In order: a fault, a stopped guest, a probe since the
+// last run, no record base, a newest backup that is not a usable pieces parent of the record,
+// a changed disk set, a changed Proxmox version, a changed disk size, a disk without record, a
+// record that counts from another job than the record state's, a full check due; otherwise a
+// changed-blocks run.
 func Decide(in Inputs) Decision {
 	r := in.Record
 	clear := fmt.Sprintf("run ./backup.sh %s --clear-fault %s after looking at it", in.Job.Source, in.Job.Alias)
@@ -136,6 +138,9 @@ func Decide(in Inputs) Decision {
 	}
 	if r.State == pieces.RecordNone && r.Job == "" && len(r.Disks) == 0 && r.LastCheck != nil && r.LastCheck.Result == "difference" {
 		return full(RunArmFull, ReasonCleared, "full read: the fault was cleared; this run starts a new record of changes"+nextReadsChanges, true)
+	}
+	if r.State == pieces.RecordNone && r.Job != "" {
+		return full(RunArmFull, ReasonProbed, "full read: a probe of this guest came before this run"+nextReadsChanges, true)
 	}
 	if r.State != pieces.RecordBased || in.Newest == nil {
 		return full(RunArmFull, ReasonFirstRun, "full read: first run with changed reads"+nextReadsChanges, true)

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -481,6 +482,7 @@ const (
 	lineMoved   = "full read: Proxmox's record of changes moved on since the last backup (a probe, another unit or backup machine for this guest, or an older state folder); the next run reads only changes"
 	lineOldHost = "full read: the Proxmox host does not report which job its record of changes counts from; run restic-pve update on the Proxmox host"
 	lineCleared = "full read: the fault was cleared; this run starts a new record of changes; the next run reads only changes"
+	lineProbed  = "full read: a probe of this guest came before this run; the next run reads only changes"
 )
 
 func fallbackIs(t *testing.T, res Result, line string, expected bool) {
@@ -626,7 +628,8 @@ func TestRunFullRead(t *testing.T) {
 	if r := f.record(); r.State != pieces.RecordNone || r.Base != "" {
 		t.Fatalf("record after a stopped guest %+v", r)
 	}
-	// running again (Proxmox started the guest: no record): arm and read in full
+	// running again (Proxmox started the guest: no record): arm and read in full; the record
+	// has no base, so the full read has no parent: every piece goes through restic
 	f.info["status"] = "running"
 	f.flag("stopped", false)
 	f.setBitmap(scsi, changes.BitmapNew)
@@ -635,8 +638,11 @@ func TestRunFullRead(t *testing.T) {
 	id = f.ok(res, "full")
 	fallbackIs(t, res, lineGone, true)
 	eq(t, "requests", reqs, []string{"changes 100 new", "ack arm", "dump 100"})
-	if res.StoredBytes != 0 {
-		t.Fatalf("nothing changed, yet %d bytes stored", res.StoredBytes)
+	if res.StoredBytes != disk {
+		t.Fatalf("a full read without parent stored %d bytes, want %d", res.StoredBytes, disk)
+	}
+	if m := f.restored(id); m.Parent != nil {
+		t.Fatalf("parent %s", *m.Parent)
 	}
 	if r := f.record(); r.State != pieces.RecordBased || r.Base != id {
 		t.Fatalf("record %+v", r)
@@ -644,8 +650,89 @@ func TestRunFullRead(t *testing.T) {
 	if v := f.view(); v.Kind != blockmap.KindFull || bytes.ContainsAny(v.Map, "?o") {
 		t.Fatalf("view %+v", v)
 	}
-	f.restored(id)
 	f.noPartials()
+}
+
+// A full read builds on a parent only when the newest snapshot is the record's base. The
+// control code resets the record when its check of a stored snapshot fails; the next full
+// read then stores without a parent and takes nothing of that snapshot, not even a piece whose
+// digest the manifest lists right.
+func TestFullReadAfterAResetTakesNothingOfTheBadSnapshot(t *testing.T) {
+	f := newRunFix(t, 8)
+	bad := pieces.PiecePath(scsi, 3)
+	done := false
+	f.env.beforeBatch = func(root string) { // in the tree it is a placeholder (no data) until its batch
+		p := filepath.Join(root, bad)
+		var st syscall.Stat_t
+		if done || syscall.Stat(p, &st) != nil || st.Blocks == 0 {
+			return
+		}
+		done = true
+		w, err := os.OpenFile(p, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.WriteAt(bytes.Repeat([]byte{0xbd}, 64<<10), 0) // same size and mtime, wrong content
+		w.Close()
+		mt := time.Unix(st.Mtim.Unix())
+		os.Chtimes(p, mt, mt)
+	}
+	res, _ := f.run(ModeAuto)
+	b0 := f.ok(res, "full")
+	f.env.beforeBatch = nil
+	img, _ := os.ReadFile(filepath.Join(f.host, scsi+".img"))
+	want := img[3*pieces.PieceSize : 4*pieces.PieceSize]
+	got, err := f.repo.Run("dump", b0, filepath.Join(f.state, "pieces", "web", "vm-100", bad))
+	if err != nil || !done || bytes.Equal(got, want) {
+		t.Fatalf("the wrong piece was not stored (%v)", err)
+	}
+	// the control code's verification failed: it resets the record
+	r := f.record()
+	r.State, r.Job, r.Base = pieces.RecordNone, "", ""
+	if err := r.Save(pieces.RecordFile(f.state, "web")); err != nil {
+		t.Fatal(err)
+	}
+	disk := uint64(efiLen + 8*pieces.PieceSize)
+	res, reqs := f.run(ModeAuto)
+	id := f.ok(res, "full")
+	eq(t, "requests", reqs, []string{"changes 100 new", "ack arm", "dump 100"})
+	if res.StoredBytes != disk {
+		t.Fatalf("stored %d, want the whole disk %d (no parent)", res.StoredBytes, disk)
+	}
+	if m := f.restored(id); m.Parent != nil { // byte for byte the image: no wrong piece
+		t.Fatalf("the full read built on %s", *m.Parent)
+	}
+	if r := f.record(); r.State != pieces.RecordBased || r.Base != id {
+		t.Fatalf("record %+v", r)
+	}
+	f.change(scsi, 5)
+	res, _ = f.run(ModeAuto)
+	f.restored(f.ok(res, "changes"))
+	f.noPartials()
+}
+
+// A probe from this backup machine moves Proxmox's record on: the next run says so, arms and
+// reads in full without a parent.
+func TestRunAfterAProbe(t *testing.T) {
+	f := newRunFix(t, 8)
+	res, _ := f.run(ModeAuto)
+	f.ok(res, "full")
+	f.change(scsi, 2)
+	f.stderr.Reset()
+	if p := Probe(context.Background(), f.env, f.job(ModeProbe)); p.Code != 0 || p.Kind != "probe" {
+		t.Fatalf("probe %+v\n%s", p, f.stderr.String())
+	}
+	f.change(scsi, 4)
+	res, reqs := f.run(ModeAuto)
+	id := f.ok(res, "full")
+	fallbackIs(t, res, lineProbed, true)
+	eq(t, "requests", reqs, []string{"changes 100 new", "ack arm", "dump 100"})
+	if m := f.restored(id); m.Parent != nil {
+		t.Fatalf("parent %s", *m.Parent)
+	}
+	f.change(scsi, 6)
+	res, _ = f.run(ModeAuto)
+	f.restored(f.ok(res, "changes"))
 }
 
 // 4.7: a full check on a clean fake says "full check: ok"; a piece the record missed gives
@@ -660,13 +747,15 @@ func TestRunFullCheck(t *testing.T) {
 	id := f.ok(res, "check")
 	fallbackIs(t, res, lineCheck, true)
 	eq(t, "requests", reqs, []string{"dump 100", "changes 100 use", "ack ok"})
-	if res.Check != "ok" || res.Message != "full check: ok" || res.Fault != nil {
+	// read_bytes counts the disk once: the full read; the changed pieces the job sends again
+	// are not added, and nothing was skipped
+	disk := uint64(efiLen + 8*pieces.PieceSize)
+	if res.Check != "ok" || res.Message != "full check: ok" || res.Fault != nil || res.ReadBytes != disk || res.SkippedBytes != 0 {
 		t.Fatalf("%+v", res)
 	}
 	// the full read of the check has no parent: every piece goes through restic (the whole
 	// disk is hashed again), which uploads only what the repository lacks: piece 3 (64 KiB of
 	// new data) and the manifest
-	disk := uint64(efiLen + 8*pieces.PieceSize)
 	grown := dirSize(filepath.Join(f.repo.Dir, "data")) - before
 	t.Logf("full check: %d bytes handed to restic, the repository grew by %d bytes", res.StoredBytes, grown)
 	if res.StoredBytes != disk || grown > 256<<10 {
@@ -696,6 +785,7 @@ func TestRunFullCheck(t *testing.T) {
 	res, _ = f.run(ModeAuto)
 	f.ok(res, "check")
 	eq(t, "check", res.Check, "ok")
+	eq(t, "read and skipped of a check", []uint64{res.ReadBytes, res.SkippedBytes}, []uint64{disk, 0})
 	// a write the record missed
 	f.stale(scsi, 6)
 	f.change(scsi, 2)

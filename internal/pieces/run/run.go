@@ -48,7 +48,7 @@ type runner struct {
 	recPath, root, staging string
 	batch                  uint64
 	partial                []string        // the tags of this run's batch snapshots
-	parent                 *pieces.Parent  // the newest backup when it is a usable pieces parent
+	parent                 *pieces.Parent  // the record's base when it is the newest backup and a usable parent
 	stores                 []*pieces.Store // the accepted snapshots' stores: their partials go at the end
 	started                time.Time
 	res                    Result
@@ -124,7 +124,9 @@ func Run(ctx context.Context, e Env, j *Job) Result {
 }
 
 // look forgets the batch snapshots a crashed run left, finds the newest backup of the unit
-// and loads it as the parent when it is a usable pieces snapshot of this guest.
+// and loads it as the parent only when it is the record's base (state based, no fault) and a
+// usable pieces snapshot of this guest: every other run reads in full without a parent, so
+// nothing of a snapshot the record does not build on is taken on trust.
 func (r *runner) look() (*pieces.Snapshot, error) {
 	R := r.e.Restic
 	if left, err := R.Snapshots(r.ctx, r.j.ResticHost, r.partial); err == nil && len(left) > 0 {
@@ -139,8 +141,8 @@ func (r *runner) look() (*pieces.Snapshot, error) {
 		return nil, err
 	}
 	n := &snaps[len(snaps)-1]
-	if len(n.Paths) == 1 && n.Paths[0] == r.root {
-		p, err := pieces.LoadParent(r.ctx, R, n.ID, r.want(""))
+	if r.rec.State == pieces.RecordBased && r.rec.Fault == nil && n.ID == r.rec.Base {
+		p, err := pieces.LoadParent(r.ctx, R, n.ID, r.want(n.ID))
 		if err != nil && !errors.Is(err, pieces.ErrParent) {
 			return nil, err
 		}
@@ -495,8 +497,10 @@ func (r *runner) check(d Decision, in Inputs) Result {
 	if err != nil {
 		return r.fail(jb.stop(err, false))
 	}
-	r.res.Check = "ok"
-	return r.done(s, "full check: ok")
+	// read_bytes stays the full read: the disk once; the changed pieces the job sent again are
+	// not counted twice, and nothing was skipped
+	r.res.Check, r.res.StoredBytes = "ok", r.res.StoredBytes+s.stats.KeptBytes
+	return r.end(CodeOK, false, "full check: ok")
 }
 
 // --- storing ---

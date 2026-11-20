@@ -309,13 +309,17 @@ once more when Proxmox's header arrives:
 | Run | When | Requests | Result `kind` |
 |---|---|---|---|
 | changed blocks | the newest backup is the record's base, a usable pieces snapshot, every disk `reuse`, sizes, disk set and Proxmox version unchanged, and the header's `prev` is the record state's job | `changes <vmid> use`, `ack ok <id>` after acceptance | `changes` |
-| arm and full read | first run, record gone, something changed, another job moved the record on (`prev`), a host without `prev`, the first run after a cleared fault, the newest backup not in the piece layout, failed checks | `changes <vmid> use` acked `arm`, or `changes <vmid> new` acked `arm`; then `dump <vmid>` | `full` |
+| arm and full read | first run, a probe before this run, record gone, something changed, another job moved the record on (`prev`), a host without `prev`, the first run after a cleared fault, the newest backup not in the piece layout, failed checks | `changes <vmid> use` acked `arm`, or `changes <vmid> new` acked `arm`; then `dump <vmid>` | `full` |
 | full read | guest stopped, a fault set, the plug-in not ready (79) | `dump <vmid>` only | `full` |
 | full check | the seventh successful run (`full_check_every`), or mode `full-check` | `dump <vmid>`, then `changes <vmid> use` | `check` |
 | single stream | the state file system has less than 576 MiB free | `dump <vmid>` into `restic backup --stdin` (RVS1, `/<alias>/vm-<vmid>.rvs`) | `full` |
 
 A full read puts the VMA clusters together into 4 MiB pieces (in any order; zero clusters stay
-holes); a piece equal to the parent's stays a placeholder. At most 256 pieces (1 GiB) may be
+holes); a piece equal to the parent's stays a placeholder. A full read has a parent only when
+the newest backup is the record's base (state `based`, no fault); otherwise (no base, a probe
+or a reset of the record, a fault, a newest backup that is not the base) it is stored without
+one, as a full check is (see
+[stream-contract.md](stream-contract.md#how-a-run-stores-the-layout)). At most 256 pieces (1 GiB) may be
 incomplete at a time; beyond that the run stops with exit 7 and says to set `MAX_WORKERS=1` in
 `/etc/restic-pve.conf` on the Proxmox host and to check the guest's fleecing storage. A dump
 that ends with a piece incomplete is exit 3. A full check accepts the full read (kind
@@ -350,6 +354,7 @@ successful run):
 | `reason` | `line` | `expected` |
 |---|---|---|
 | `first-run` | `full read: first run with changed reads; the next run reads only changes` | true |
+| `probed` | `full read: a probe of this guest came before this run; the next run reads only changes` | true |
 | `stopped` | `full read: the guest is stopped` | true |
 | `record-gone` | `full read: Proxmox has no record of changes (guest restarted, stopped or a disk changed); the next run reads only changes` | true |
 | `check-due` | `full check: reading the whole disk to compare` | true |
@@ -375,7 +380,11 @@ The result line (last stderr line):
 ```
 
 `read_bytes` is what came from the host, `stored_bytes` what was handed to restic (pieces that
-differ from the parent), `skipped_bytes` what was not read. `fault` is
+differ from the parent; every piece without one), `skipped_bytes` what was not read. For kind
+`check`, `read_bytes` is the full read, the disk once: the changed pieces the job sends again
+for the final snapshot are not added; `skipped_bytes` is 0; `stored_bytes` is the full read
+(the whole disk, no parent) plus the changed pieces that differ from it; `disks[].dirty_bytes`
+are the pieces the job sent. `fault` is
 `{"date","disks","pieces"}` only in the run whose full check found the difference. Before it:
 `progress` lines (`bytes_done` counts pieces read or skipped), one `consistency` line (that of
 the stored snapshot's source) and `vzdump` warn and error lines, as `stream backup` writes them.
