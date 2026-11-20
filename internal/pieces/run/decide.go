@@ -29,6 +29,9 @@ const (
 	ReasonPVE        = "pve-changed"
 	ReasonRecordGone = "record-gone"
 	ReasonCheckDue   = "check-due"
+	ReasonChecks     = "checks-failed" // the changed-blocks run failed C1-C3 (Run)
+	ReasonNotReady   = "not-ready"     // the host answered exit 79 (Run)
+	ReasonNoSpace    = "no-space"      // too little working space: the single stream (Run)
 )
 
 const nextReadsChanges = "; the next run reads only changes"
@@ -46,7 +49,7 @@ func (d Decision) Fallback() *Fallback {
 	if d.Run == RunChanges {
 		return nil
 	}
-	return &Fallback{Reason: d.Reason, Expected: d.Expected}
+	return &Fallback{Reason: d.Reason, Expected: d.Expected, Line: d.Line}
 }
 
 // Info is what the decision needs of the request info JSON in the job file.
@@ -120,12 +123,16 @@ func Decide(in Inputs) Decision {
 	if in.Info.Status != "running" {
 		return full(RunFull, ReasonStopped, "full read: the guest is stopped", true)
 	}
-	firstRun := full(RunArmFull, ReasonFirstRun, "full read: first run with changed reads"+nextReadsChanges, true)
+	gone := full(RunArmFull, ReasonRecordGone, "full read: Proxmox has no record of changes (guest restarted, stopped or a disk changed)"+nextReadsChanges, true)
+	pieceLayout := in.Newest != nil && len(in.Newest.Paths) == 1 && in.Newest.Paths[0] == in.Root
+	if r.State == pieces.RecordNone && r.Job == "" && len(r.Disks) > 0 && pieceLayout {
+		return gone // a full read without a provider job (stopped guest) started the record over
+	}
 	if r.State != pieces.RecordBased || in.Newest == nil {
-		return firstRun
+		return full(RunArmFull, ReasonFirstRun, "full read: first run with changed reads"+nextReadsChanges, true)
 	}
 	notPieces := full(RunArmFull, ReasonNotPieces, "full read: the last backup is not in the piece layout", true)
-	if len(in.Newest.Paths) != 1 || in.Newest.Paths[0] != in.Root || in.Newest.ID != r.Base ||
+	if !pieceLayout || in.Newest.ID != r.Base ||
 		in.ParentErr != nil || in.Parent == nil || in.ParentID != r.Base {
 		return notPieces
 	}
@@ -161,7 +168,7 @@ func Decide(in Inputs) Decision {
 		}
 		for _, d := range h.Devices {
 			if d.Bitmap != "reuse" {
-				return full(RunArmFull, ReasonRecordGone, "full read: Proxmox has no record of changes (guest restarted, stopped or a disk changed)"+nextReadsChanges, true)
+				return gone
 			}
 		}
 		return Decision{Run: RunChanges, Expected: true}

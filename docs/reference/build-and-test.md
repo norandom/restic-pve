@@ -60,7 +60,10 @@ No test needs a Proxmox host or root:
   serves an export with a dirty bitmap and can break the protocol in a dozen ways.
   `internal/nbd/nbdtest/fakenbd` is the same server as a program, for trials without Proxmox; it
   is never part of a release.
-- The `pieces` probe tests use the test binary as `ssh` and the Proxmox side behind it.
+- The `pieces` tests use the test binary as `ssh` and the Proxmox side behind it: for the
+  stored runs a fake host with two disk images, Proxmox's change record of each disk, the
+  changes stream and the ack, and `dump` as a VMA stream; against restic 0.19.1 they take
+  about five minutes.
 
 ## Tests that need restic or Perl
 
@@ -72,7 +75,7 @@ workflow.
 
 | Variable | Default | Used by |
 |---|---|---|
-| `RESTIC_PVE_TEST_RESTIC` | `<user cache dir>/restic-pve-test/restic-0.19.1` | `internal/pieces`, `internal/testfix` |
+| `RESTIC_PVE_TEST_RESTIC` | `<user cache dir>/restic-pve-test/restic-0.19.1` | `internal/pieces`, `internal/testfix`, `internal/stream/cli` (a pieces snapshot through `verify`, `to-vma`, `to-raw --pieces`) |
 | `RESTIC_PVE_TEST_PERL` | `perl` in `PATH` | `internal/provider` |
 | `RESTIC_PVE_TEST_REQUIRE` | unset | `1` turns every such skip into a failure |
 
@@ -98,7 +101,7 @@ or out of a built backup image: `docker run --rm --entrypoint cat <backup image>
 docker run --rm -u "$(id -u):$(id -g)" -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOLCHAIN=local \
   -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e RESTIC_PVE_TEST_RESTIC=/fix/restic-0.19.1 \
   -v "$PWD:/src:ro" -v "$PWD/fix:/fix" -w /src golang:1.27.1-alpine3.24 sh -c 'go test -count=1 ./... &&
-  RESTIC_PVE_TEST_REQUIRE=1 go test -count=1 ./internal/pieces ./internal/testfix &&
+  RESTIC_PVE_TEST_REQUIRE=1 go test -count=1 ./internal/pieces ./internal/testfix ./internal/stream/cli &&
   go test -c -o /fix/provider.test ./internal/provider && go test -c -o /fix/wrapper.test ./internal/wrapper'
 for p in provider wrapper; do docker run --rm -u "$(id -u):$(id -g)" -e RESTIC_PVE_TEST_REQUIRE=1 \
   -v "$PWD:/src:ro" -v "$PWD/fix:/fix:ro" -w /src/internal/$p perl:5.40-slim /fix/$p.test -test.count=1 -test.v; done

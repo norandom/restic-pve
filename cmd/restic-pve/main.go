@@ -18,7 +18,7 @@
 //	restic-pve space [--plain|--check]                  storage space; --check: one line, exit 0 ok, 1 low, 2 unknown
 //	restic-pve watch [--once]                           the backup that runs now: guest block view or local progress
 //	restic-pve stream <backup|verify|to-vma|to-raw> ... the stream program (the former vmastream)
-//	restic-pve pieces --job FILE                        one guest run in the piece layout (this release: the probe)
+//	restic-pve pieces --job FILE                        one guest run in the piece layout: a probe or a stored run
 //
 // Both:
 //

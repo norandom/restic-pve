@@ -74,10 +74,14 @@ func (h *vmaHandler) patched(uint8, uint32) error { return nil }
 // the writer aborts. out holds a truncated VMA stream that no reader
 // (and no qmrestore) accepts.
 func ToVMA(in io.Reader, out io.Writer, o Options) (*Result, error) {
+	return toVMA(out, func(h handler) (*Result, error) { return walk(in, h, o) })
+}
+
+func toVMA(out io.Writer, walk func(handler) (*Result, error)) (*Result, error) {
 	bw := bufio.NewWriterSize(out, 1<<20)
 	ow := &errWriter{w: bw}
 	h := &vmaHandler{out: ow}
-	res, err := walk(in, h, o)
+	res, err := walk(h)
 	if err != nil {
 		if h.w != nil {
 			h.w.Abort()

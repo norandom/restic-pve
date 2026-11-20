@@ -18,9 +18,9 @@ never stored on disk; a bounded RAM reorder buffer handles out-of-order clusters
 | Command | Input | Output |
 |---|---|---|
 | `backup` | VMA via `ssh ... dump <id>` or `--input FILE` | RVS1 on stdout, manifest JSON (`--manifest-out`) |
-| `verify` | RVS1 on stdin or `--in` | fingerprint check against trailer and `--manifest` |
-| `to-vma` | RVS1 on stdin or `--in` | uncompressed VMA (`--out FILE` or `-`) |
-| `to-raw` | RVS1 on stdin or `--in` | `<dir>/<device>.raw` (sparse) and `<dir>/SHA256SUMS` |
+| `verify` | RVS1 on stdin or `--in`; with `--pieces` the tar of a pieces snapshot | fingerprint check against trailer and `--manifest` |
+| `to-vma` | the same | uncompressed VMA (`--out FILE` or `-`) |
+| `to-raw` | the same | `<dir>/<device>.raw` (sparse) and `<dir>/SHA256SUMS` |
 
 `restic-pve stream <command> -h` lists the flags. All hosts, ids and paths come from flags; the
 command has no built-in site value and no default folder.
@@ -119,13 +119,40 @@ restic-pve stream to-vma --in vm-100.rvs --manifest ./vm-100.manifest.json --out
 restic-pve stream to-raw --in vm-100.rvs --dir ./restore/example
 ```
 
+### With `--pieces`: a snapshot in the piece layout
+
+With `--pieces` the input is the tar that `restic dump --archive tar <snapshot> <root>` writes
+for a snapshot in the [piece layout](#the-piece-layout-schema-2); the output and the rules above
+stay the same. The reader takes the first file as the manifest (it must be `_manifest.json`; the
+folder above it is the root, with or without a leading `/`), then expects every other file of
+the manifest exactly once and in the layout's name order; folder entries are skipped. Each piece
+must have its manifest digest and each disk its `sha256pt`; each config file its digest. Only
+one piece (4 MiB) is held in memory, and nothing of the image is written to disk except
+`to-raw`'s output.
+
+- `to-vma` writes the config files as blobs. When `qemu-server.conf` has no `#qmdump#map:`
+  line (a config from a Proxmox provider job), the lines the manifest kept from the last full
+  read (`qmdump_map`) are put in front of it, where vzdump writes them.
+- `--manifest M` is then a manifest of schema 2 (the copy the control code keeps) that the
+  snapshot's own manifest must match: the same disks with the same ids, names, sizes and
+  `sha256pt`.
+- Exit 3: a truncated tar, a file out of order, missing, twice or extra, an entry that is not a
+  plain file or a folder, a wrong piece or config file, a `sha256pt` that does not match. Exit 8:
+  the manifest inside is invalid, or does not match `--manifest`. Exit 7: the input cannot be
+  read, or the output written.
+
+```sh
+restic dump --archive tar <snapshot> /state/pieces/web/vm-100 | restic-pve stream verify --pieces
+restic dump --archive tar <snapshot> /state/pieces/web/vm-100 | restic-pve stream to-vma --pieces --out vm-100.vma
+```
+
 ## Exit codes and stderr
 
 | Code | Meaning |
 |------|---------|
 | 0 | ok |
 | 2 | usage (unknown command, bad flags or arguments) |
-| 3 | integrity (VMA md5/uuid/reserved/blockinfo error, digest mismatch, malformed RVS1) |
+| 3 | integrity (VMA md5/uuid/reserved/blockinfo error, digest mismatch, malformed RVS1 or pieces tar) |
 | 4 | forbidden content (memory state or unknown device) |
 | 5 | fleecing not active (reported by vzdump) |
 | 6 | source failed (ssh/vzdump non-zero exit, truncated stream) |
@@ -163,8 +190,10 @@ warn and error lines of the vzdump log only.
 
 ## The piece layout (schema 2)
 
-Built, not yet used by any command: the next releases store a guest that reads only its changed
-blocks in this layout instead of one RVS1 file. The code is `internal/pieces`.
+`restic-pve pieces --job` (mode `auto` or `full-check`, see [commands.md](commands.md#pieces))
+stores a guest that reads only its changed blocks in this layout instead of one RVS1 file. The
+code is `internal/pieces` and `internal/pieces/run`; `stream verify|to-vma|to-raw --pieces` read it
+(above).
 
 A snapshot of the layout is one directory, and every file in it is part of the image:
 
@@ -217,8 +246,9 @@ does not give its `sha256pt`; one changed byte in any piece changes `sha256pt`.
 
 ### How a run stores the layout
 
-Built, not yet used by a command (the code is `internal/pieces`: `placeholders.go`,
-`writer.go`, `restic.go`, `checks.go`). restic always runs as
+The stored runs of `pieces --job` (the code is `internal/pieces`: `placeholders.go`,
+`writer.go`, `restic.go`, `checks.go`; the runs in `internal/pieces/run/run.go`). restic always
+runs as
 `nice -n 19 ionice -c 3 restic --retry-lock 30m --json ...` with the environment the control
 code passes, and its output is always read to the end (a restic stopped by a closed pipe leaves
 its lock behind).
@@ -228,11 +258,13 @@ its lock behind).
    exactly the files of `restic ls` (each piece at its size). The tree is deleted and rebuilt
    from `restic ls --json --recursive`: one sparse file per piece, size and mtime (with
    nanoseconds) as listed. With `--parent` and `--ignore-inode` restic takes every placeholder
-   from the parent without opening it.
+   from the parent without opening it. A changed-blocks run builds only on the record's base;
+   a full read takes the newest pieces snapshot as its parent when the other rules hold (it
+   reads every piece anyway and compares), and after failed checks it has no parent.
 2. A piece whose SHA-256 equals the parent's stays a placeholder and never reaches restic.
-   Every other piece is staged outside the tree with the run's mtime,
-   `max(now, newest parent mtime + 1 s)` in whole seconds, so it differs from its placeholder
-   even when the clock was set back.
+   Every other piece is staged outside the tree (zero 64 KiB clusters as holes) with the run's
+   mtime, `max(now, newest parent mtime + 1 s)` in whole seconds, so it differs from its
+   placeholder even when the clock was set back.
 3. Kept pieces go into the tree in batches of `min(1 GiB, free / 4)` (at least 576 MiB free on
    the state file system). Each batch is `restic backup -v --host <h> --tag
    kind=guest-pieces-partial,<unit>,<vmid> --ignore-inode --parent <previous> <root>`; a run
@@ -249,9 +281,12 @@ its lock behind).
 
 ## The changes stream
 
-Built, not yet used by any command: `restic-pve request changes` will write it on stdout for one
-Proxmox backup provider job, and the backup machine answers with one ack line on stdin. The code
-is `internal/stream/changes`.
+`restic-pve request changes` writes it on stdout for one Proxmox backup provider job, and
+`restic-pve pieces` on the backup machine answers with one ack line on stdin: `probe` after a
+probe, `ok <id>` after a changed-blocks run was stored and accepted (the record state is written
+first), `arm` when the job starts the record before a full read, `fail` when it gives up. A
+reader that gives up while pieces are still on their way sends `fail` and ends the ssh session;
+the host side then sees the end of its stdin. The code is `internal/stream/changes`.
 
 Frames use the RVS1 frame header (64 bytes, magic `RVSF`, CRC-32C of the header) with their own
 type bytes:

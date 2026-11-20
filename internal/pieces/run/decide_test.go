@@ -70,6 +70,8 @@ func TestDecideTable(t *testing.T) {
 			i.Record = pieces.NewRecord(100)
 			i.Record.Arm(strings.Repeat("1", 32), "9.2.24", nil)
 		}), RunArmFull, ReasonFirstRun, "full read: first run with changed reads; the next run reads only changes", true},
+		{"record started over by a full read without provider job", with(func(i *Inputs) { i.Record.State, i.Record.Job, i.Record.Base = pieces.RecordNone, "", "" }), RunArmFull, ReasonRecordGone,
+			"full read: Proxmox has no record of changes (guest restarted, stopped or a disk changed); the next run reads only changes", true},
 		{"first run: no backup at all", with(func(i *Inputs) { i.Newest = nil; i.Parent = nil }), RunArmFull, ReasonFirstRun,
 			"full read: first run with changed reads; the next run reads only changes", true},
 		{"newest backup is a single stream", with(func(i *Inputs) {

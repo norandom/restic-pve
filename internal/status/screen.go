@@ -89,6 +89,13 @@ func (sc *Screen) Draw(s tcell.Screen, t retro.Theme) {
 	f := m.F
 	t.TitleBar(s, 0, cols, sc.Title, sc.checked())
 	extra := rows - fixed
+	// the box of the guests that read only changes takes two lines per guest from what the
+	// copies leave; without room, Enter lists them
+	readsH := min(2*len(m.Reads), 4, extra-1-max(len(m.Rows), 1)-2)
+	readsH -= readsH % 2
+	if readsH > 0 {
+		extra -= readsH + 2
+	}
 	verdictH := 1
 	if extra >= 6 {
 		verdictH = 2
@@ -126,6 +133,22 @@ func (sc *Screen) Draw(s tcell.Screen, t retro.Theme) {
 	}
 	if len(m.Rows) == 0 {
 		retro.Put(s, x, top, w, "No source and no guest in backup.toml yet.", t.Base)
+	}
+	if readsH > 0 {
+		title := "Guests that read only changes"
+		if n := readsH / 2; n < len(m.Reads) {
+			title += fmt.Sprintf(" (%d of %d: Enter)", n, len(m.Reads))
+		}
+		x, w, top = box(title, readsH)
+		for i, r := range m.Reads[:readsH/2] {
+			l1, l2 := r.lines()
+			retro.Put(s, x, top+2*i, w, ellipsis(t.Text(l1), w), t.Base)
+			st := t.Base
+			if r.Fault != "" {
+				st = t.Error
+			}
+			retro.Put(s, x, top+2*i+1, w, ellipsis(t.Text(l2), w), st)
+		}
 	}
 	// 2: restore
 	x, w, top = box("Have I seen a restore work?", 3)
@@ -238,6 +261,9 @@ func (sc *Screen) helpLines() []string {
 		"On the bad day (the machine or the site is lost): " + BadDayGuide + ".",
 		"Check that a restore works yourself once every six months: " + DrillGuide + ".",
 		"",
+		"A guest that reads only changes shows its last run (read from the Proxmox host, skipped as unchanged) " +
+			"and its last full check, which reads the whole disk every seventh run to prove the changes were right.",
+		"",
 		"Keys: k shows every key and proves your password copy. Space: s. Watch the backup that runs: w. " +
 			"r reads the storage now; otherwise it is read at most every six hours.",
 	}
@@ -254,10 +280,26 @@ func (sc *Screen) drawDetails(s tcell.Screen, t retro.Theme) {
 		word, rest := sc.copyLine(r)
 		lines = append(lines, fmt.Sprintf("%-4s %s", word, rest))
 	}
+	if len(sc.Model.Reads) > 0 {
+		lines = append(lines, "", "Guests that read only changes:")
+	}
+	for _, r := range sc.Model.Reads {
+		l1, _ := r.lines()
+		when := ""
+		if r.Ended != nil {
+			when = local(*r.Ended, "Mon 2 Jan 15:04") + " · "
+		}
+		lines = append(lines, l1, fmt.Sprintf("%-8s %s%s", "", when, r.Check))
+		if r.Fault != "" {
+			for _, l := range retro.Wrap(r.Fault, cols-16) {
+				lines = append(lines, fmt.Sprintf("%-8s %s", "", l))
+			}
+		}
+	}
 	h := rows - 4
 	sc.Top = max(min(sc.Top, len(lines)-(h-4)), 0)
 	end := min(sc.Top+h-4, len(lines))
-	tui.Overlay(s, t, fmt.Sprintf("All copies (%d)", len(lines)), lines[sc.Top:end],
+	tui.Overlay(s, t, fmt.Sprintf("All copies (%d)", len(sc.Model.Rows)), lines[sc.Top:end],
 		"Up/Down scroll · Enter or Esc closes this list", false)
 	_ = cols
 }

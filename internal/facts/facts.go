@@ -49,6 +49,7 @@ type Facts struct {
 	FromCache   bool      // the storage facts come from the cache
 	Deferred    bool      // a backup runs: the storage read waits, the cache is shown
 	Errors      []FactError
+	Reads       map[string]GuestReads // per alias: guests that read only changed blocks
 }
 
 // Instance is one local source instance or one guest.
@@ -78,6 +79,7 @@ type SpaceFacts struct {
 	RepoSizes map[string]RepoSize // per source
 	Runs      []Run               // the recorded runs of both profiles, oldest first
 	GuestSize map[string]*int64   // per guest alias: its newest image
+	Work      *WorkSpace          // the pieces runs' working space; nil: none on this machine
 }
 
 // FactError is something that could not be read, with what to do.
@@ -235,6 +237,7 @@ func Local(e Env, c Config) Facts {
 		f.Next = append(f.Next, n)
 	}
 	f.Proof = ProofDate(state, e.Getenv(PasswordEnv))
+	f.Reads, f.Space.Work = guestReads(state, c, recG), workSpace(state, c)
 	return f
 }
 

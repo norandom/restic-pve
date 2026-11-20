@@ -49,14 +49,15 @@ type Model struct {
 	Rows    []Row // not safe first, then not known, then safe
 	Verdict Verdict
 	Now     time.Time
-	Hint    string // the start command (RESTIC_PVE_START_HINT)
+	Hint    string     // the start command (RESTIC_PVE_START_HINT)
+	Reads   []ReadsRow // guests that read only changed blocks, those with a fault first
 }
 
 // Build applies the safety rule: an instance is safe when its newest checked copy is not
 // older than its interval plus two days. Until the records hold a check of its repository,
 // the newest copy counts, with the note "check not recorded yet".
 func Build(f facts.Facts, hint string, now time.Time) Model {
-	m := Model{F: f, Now: now, Hint: hint}
+	m := Model{F: f, Now: now, Hint: hint, Reads: readsRows(f, hint)}
 	var groups [3][]Row
 	for _, in := range f.Instances {
 		r := row(in, hint, now)
@@ -235,6 +236,9 @@ func (m Model) Plain() []string {
 		default:
 			add("copy", r.In.Name, "unknown", "-", r.Reason, "do: "+r.Do)
 		}
+	}
+	for _, r := range m.Reads {
+		out = append(out, r.plain...)
 	}
 	f := m.F
 	if t := f.RestoreTest; t != nil {

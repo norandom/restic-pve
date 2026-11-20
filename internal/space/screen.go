@@ -56,16 +56,18 @@ func (sc *Screen) Draw(s tcell.Screen, t retro.Theme) {
 		y += h + 2
 		return x + 1, w - 2, top
 	}
-	x, w, top := box("Storage", 2)
-	for i, l := range m.StorageLines() {
-		if i < 2 {
-			retro.Put(s, x, top+i, w, t.Text(l), t.Base)
-		}
+	storage := m.StorageLines()[:2]
+	if wl := m.WorkLine(); wl != "" {
+		storage = append(storage, retro.Wrap(t.Text(wl), cols-6)...)
+	}
+	x, w, top := box("Storage", len(storage))
+	for i, l := range storage {
+		retro.Put(s, x, top+i, w, t.Text(l), t.Base)
 	}
 	wl := m.WarningLines()
 	warn := append(retro.Wrap(t.Text(wl[0]), cols-6), retro.Wrap(t.Text(wl[1]), cols-6)...)
 	dont := retro.Wrap(t.Text(DontTouch), cols-2)
-	n := max(min(len(m.Rows), rows-1-4-2-(len(warn)+2)-len(dont)-1), 1)
+	n := max(min(len(m.Rows), rows-1-(len(storage)+2)-2-(len(warn)+2)-len(dont)-1), 1)
 	x, w, top = box("Backups and how long they are kept", n)
 	shown, more := m.Rows, 0
 	if len(shown) > n {

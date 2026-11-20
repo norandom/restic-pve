@@ -81,7 +81,17 @@ func (r *Restic) Command(ctx context.Context, args ...string) *exec.Cmd {
 // whatever consume leaves is drained. A non-zero exit is not an error here: it is in the
 // Outcome. The error is a failed start or consume's error.
 func (r *Restic) Raw(ctx context.Context, consume func(io.Reader) error, args ...string) (Outcome, error) {
+	return r.RawIn(ctx, nil, consume, args...)
+}
+
+// RawIn is Raw with stdin as restic's standard input (nil: none). This process's copy of
+// stdin is closed once restic started, so restic sees its end when the writer closes.
+func (r *Restic) RawIn(ctx context.Context, stdin *os.File, consume func(io.Reader) error, args ...string) (Outcome, error) {
 	cmd := r.Command(ctx, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+		defer stdin.Close()
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Outcome{Exit: -1}, err
@@ -92,6 +102,9 @@ func (r *Restic) Raw(ctx context.Context, consume func(io.Reader) error, args ..
 	}
 	if err := cmd.Start(); err != nil {
 		return Outcome{Exit: -1}, fmt.Errorf("start restic: %w", err)
+	}
+	if stdin != nil {
+		stdin.Close()
 	}
 	var out Outcome
 	var wg sync.WaitGroup

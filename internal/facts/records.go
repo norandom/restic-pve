@@ -30,6 +30,7 @@ type Records struct {
 	RestoreTest *RestoreTest        `json:"restore_test"`
 	RepoSizes   map[string]RepoSize `json:"repo_sizes"`
 	Runs        []Run               `json:"runs"`
+	GuestRuns   map[string]GuestRun `json:"guest_runs"` // per alias: the last run that read only changes
 }
 
 // Check is the last integrity check of a source's repository.

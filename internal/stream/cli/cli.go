@@ -81,6 +81,9 @@ Commands:
   to-raw   read RVS1 (stdin or --in) and write one sparse raw file per device
   help     show this help
 
+verify, to-vma and to-raw read the tar of a snapshot in the piece layout with --pieces
+(restic dump --archive tar <snapshot> <root>).
+
 Run 'restic-pve stream <command> -h' for the flags of a command.
 
 Exit codes:

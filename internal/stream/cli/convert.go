@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/norandom/restic-pve/internal/pieces"
 	"github.com/norandom/restic-pve/internal/stream/convert"
 	"github.com/norandom/restic-pve/internal/stream/rvs"
 	"github.com/norandom/restic-pve/internal/stream/verify"
@@ -16,12 +17,15 @@ import (
 type convertFlags struct {
 	manifest string
 	in       string
+	pieces   bool
 }
 
 func addConvertFlags(fs *flag.FlagSet) *convertFlags {
 	var c convertFlags
 	fs.StringVar(&c.manifest, "manifest", "", "manifest JSON to compare against (devices, sizes, sha256ct)")
 	fs.StringVar(&c.in, "in", "", "read RVS1 from this file instead of stdin")
+	fs.BoolVar(&c.pieces, "pieces", false, "the input is the tar of a snapshot in the piece layout (restic dump --archive tar);\n"+
+		"--manifest is then a manifest of schema 2 that the snapshot's own must match")
 	return &c
 }
 
@@ -30,7 +34,7 @@ func convertExit(err error) exitCode {
 	switch {
 	case errors.Is(err, rvs.ErrIntegrity):
 		return exitIntegrity
-	case errors.Is(err, verify.ErrManifest):
+	case errors.Is(err, verify.ErrManifest), errors.Is(err, pieces.ErrManifest):
 		return exitManifestMismatch
 	case errors.Is(err, convert.ErrLocalIO):
 		return exitLocalIO
@@ -44,7 +48,17 @@ func convertExit(err error) exitCode {
 func (c *convertFlags) prepare(stdin io.Reader) (io.Reader, convert.Options, func(), exitCode, error) {
 	var o convert.Options
 	nop := func() {}
-	if c.manifest != "" {
+	if c.manifest != "" && c.pieces {
+		f, err := os.Open(c.manifest)
+		if err != nil {
+			return nil, o, nop, exitLocalIO, err
+		}
+		o.Pieces, err = pieces.ReadManifest(f)
+		f.Close()
+		if err != nil {
+			return nil, o, nop, exitManifestMismatch, err
+		}
+	} else if c.manifest != "" {
 		m, err := verify.ReadManifestFile(c.manifest)
 		if err != nil {
 			if errors.Is(err, verify.ErrManifest) {
@@ -75,7 +89,11 @@ func cmdVerify(args []string, stdin io.Reader, _, stderr io.Writer) (exitCode, b
 	if err != nil {
 		return code, false, err
 	}
-	if _, err := convert.Verify(in, o); err != nil {
+	verifyFn := convert.Verify
+	if c.pieces {
+		verifyFn = convert.VerifyPieces
+	}
+	if _, err := verifyFn(in, o); err != nil {
 		return convertExit(err), false, err
 	}
 	return exitOK, false, nil
@@ -107,7 +125,11 @@ func cmdToVMA(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCod
 		defer f.Close()
 		out = f
 	}
-	if _, err := convert.ToVMA(in, out, o); err != nil {
+	toVMA := convert.ToVMA
+	if c.pieces {
+		toVMA = convert.ToVMAPieces
+	}
+	if _, err := toVMA(in, out, o); err != nil {
 		return convertExit(err), false, err
 	}
 	if f != nil {
@@ -136,7 +158,11 @@ func cmdToRaw(args []string, stdin io.Reader, _, stderr io.Writer) (exitCode, bo
 	if err != nil {
 		return code, false, err
 	}
-	if _, err := convert.ToRaw(in, *dir, o); err != nil {
+	toRaw := convert.ToRaw
+	if c.pieces {
+		toRaw = convert.ToRawPieces
+	}
+	if _, err := toRaw(in, *dir, o); err != nil {
 		return convertExit(err), false, err
 	}
 	return exitOK, false, nil

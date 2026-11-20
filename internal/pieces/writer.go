@@ -1,6 +1,7 @@
 package pieces
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -310,12 +311,30 @@ func (w *Writer) stagePath(p Piece) string {
 	return filepath.Join(w.opt.Staging, fmt.Sprintf("%s.%08d", p.Device, p.Index))
 }
 
+var zeros [64 << 10]byte
+
+// stage writes a kept piece to staging with the run's mtime; its zero 64 KiB clusters stay
+// holes.
 func (w *Writer) stage(p Piece, data []byte) error {
 	path := w.stagePath(p)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("pieces: stage %s: %w", p.Rel, err)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err == nil {
+		for off := 0; off < len(data) && err == nil; off += len(zeros) {
+			if b := data[off:min(off+len(zeros), len(data))]; !bytes.Equal(b, zeros[:len(b)]) {
+				_, err = f.WriteAt(b, int64(off))
+			}
+		}
+		if err == nil {
+			err = f.Truncate(int64(len(data)))
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
 	}
-	if err := os.Chtimes(path, w.mtime, w.mtime); err != nil {
+	if err == nil {
+		err = os.Chtimes(path, w.mtime, w.mtime)
+	}
+	if err != nil {
 		return fmt.Errorf("pieces: stage %s: %w", p.Rel, err)
 	}
 	return nil

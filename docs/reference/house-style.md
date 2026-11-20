@@ -330,14 +330,18 @@ the fixed sentence, the key bar at the bottom. They fit 80 x 24; below 60 x 20, 
 - Status: three boxes, one per question: "Is there a recent copy away from the site?" (one
   row per source instance and guest, not safe first, `■ NO` in the error colours), "Have I seen a
   restore work?" (restore test, drill, the bad-day guide), "Now and next" (running, next, space,
-  updates and alerts, password proof). Under them the verdict: "All copies are recent and
+  updates and alerts, password proof); between the first two, when a guest reads only changes,
+  "Guests that read only changes" with two lines per guest (last run, read and skipped; time and
+  last full check, or the fault in the error colours), only as far as the copies leave room.
+  Under them the verdict: "All copies are recent and
   checked." or the first instance that is not safe with its one action. Enter lists all rows,
   `?` shows the help.
 - Keys: one box with two lines per key (name, copy away, state and where it is; what it
   does and what happens when it is lost), a box with the state of the password copy, a box with
   the release signing key note and the other secrets. `p` opens the proof box: a navy field that
   shows a fixed `●●●●●●` after the first key, whatever the length.
-- Space: Storage (total, used, free as reported), Backups and how long they are kept, Warning
+- Space: Storage (total, used, free as reported; the pieces working space per guest and in
+  total when there is one), Backups and how long they are kept, Warning
   (the rule in words with today's numbers; the action in the error colours when it holds), and
   the fixed sentence in yellow: do not delete or move files on the storage by hand.
 

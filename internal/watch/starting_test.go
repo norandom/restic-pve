@@ -134,7 +134,7 @@ func TestRunStarting(t *testing.T) {
 	done := make(chan error)
 	go func() {
 		done <- Run(scr, Options{Dir: view, State: st, Words: words, Color: true, Poll: 20 * time.Millisecond,
-			Idle: 100 * time.Millisecond, Ready: func() {
+			Idle: 500 * time.Millisecond, Ready: func() {
 				select {
 				case frames <- strings.Join(lines(scr), "\n"):
 				default:
@@ -158,7 +158,7 @@ func TestRunStarting(t *testing.T) {
 		}
 	}
 	wait("is getting ready")
-	time.Sleep(300 * time.Millisecond) // longer than Idle: it must stay open
+	time.Sleep(800 * time.Millisecond) // longer than Idle: it must stay open
 	s := state()
 	s.Started, s.Updated = time.Now(), time.Now()
 	os.WriteFile(filepath.Join(view, blockmap.LiveFile), s.Encode(), 0o644)

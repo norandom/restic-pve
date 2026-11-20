@@ -158,6 +158,44 @@ func (m Model) WarningLines() []string {
 	return []string{rule, "Now: " + m.Unknown() + "; no warning can be computed."}
 }
 
+// WorkLine is the working space of the pieces runs on this machine, per guest and in total;
+// "" when no guest reads only changes.
+func (m Model) WorkLine() string {
+	w := m.F.Work
+	if w == nil {
+		return ""
+	}
+	var per []string
+	for _, g := range w.Guests {
+		per = append(per, g.Alias+" "+facts.Size(g.Bytes))
+	}
+	line := "Pieces working space: " + facts.Size(w.Total) + " in total"
+	if len(per) > 0 {
+		line += " (" + strings.Join(per, ", ") + ")"
+	}
+	line += " in " + w.Dir
+	if w.Free != nil {
+		line += ", " + facts.Size(*w.Free) + " free"
+	}
+	return line
+}
+
+func (m Model) workPlain() []string {
+	w := m.F.Work
+	if w == nil {
+		return nil
+	}
+	nb := func(b int64) string { return strings.ReplaceAll(facts.Size(b), " ", "") }
+	p := []string{"work", w.Dir, "total " + nb(w.Total)}
+	for _, g := range w.Guests {
+		p = append(p, g.Alias+" "+nb(g.Bytes))
+	}
+	if w.Free != nil {
+		p = append(p, "free "+nb(*w.Free))
+	}
+	return []string{strings.Join(p, "  ")}
+}
+
 // Plain is the space view as plain lines.
 func (m Model) Plain() []string {
 	var out []string
@@ -167,6 +205,7 @@ func (m Model) Plain() []string {
 	} else {
 		out = append(out, "storage  "+m.Unknown())
 	}
+	out = append(out, m.workPlain()...)
 	for _, r := range m.Rows {
 		size := r.Size
 		if size == "" {

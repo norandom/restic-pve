@@ -201,8 +201,12 @@ func writeAtomic(dir, name string, b []byte) (err error) {
 // failure (digest or manifest mismatch, malformed stream, I/O) every raw
 // file created is renamed to *.raw.invalid and no SHA256SUMS is written.
 func ToRaw(in io.Reader, dir string, o Options) (*Result, error) {
+	return toRaw(dir, func(h handler) (*Result, error) { return walk(in, h, o) })
+}
+
+func toRaw(dir string, walk func(handler) (*Result, error)) (*Result, error) {
 	h := &rawHandler{dir: dir}
-	res, err := walk(in, h, o)
+	res, err := walk(h)
 	if err == nil {
 		err = h.finish()
 	}

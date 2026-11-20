@@ -12,6 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/norandom/restic-pve/internal/pieces"
 	prun "github.com/norandom/restic-pve/internal/pieces/run"
 	"github.com/norandom/restic-pve/internal/role"
 	"github.com/norandom/restic-pve/internal/watch"
@@ -31,12 +34,13 @@ func (l *lockedBuffer) Write(p []byte) (int, error) {
 	return l.b.Write(p)
 }
 
-// cmdPieces is `restic-pve pieces --job FILE`: one guest run in the piece layout. This release
-// runs the probe (job mode "probe"): the Proxmox host is asked for its record of changed
-// blocks, nothing is read and nothing is stored. The JSON lines and the result line go to
-// stderr. On a terminal the block view shows the record while the probe runs and after it,
-// until q; the JSON lines follow when the view is left. Without a terminal one plain line goes
-// to stdout. The exit code is the result's code.
+// cmdPieces is `restic-pve pieces --job FILE`: one guest run in the piece layout. Job mode
+// probe asks the Proxmox host for its record of changed blocks and stores nothing; modes auto
+// and full-check are the stored runs (prun.Run), with restic as a child in the environment
+// backupctl passes. The JSON lines and the result line go to stderr. On a terminal the block
+// view shows the run while it runs and after it, until q; the JSON lines follow when the view
+// is left. Without a terminal one plain line goes to stdout. The exit code is the result's
+// code.
 func cmdPieces(args []string, e env) int {
 	fs := flag.NewFlagSet("restic-pve pieces", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -45,7 +49,8 @@ func cmdPieces(args []string, e env) int {
 		fmt.Fprintln(e.stderr, piecesUsage)
 		return prun.CodeUsage
 	}
-	// the job's children (ssh) never see a secret of this environment
+	// restic gets the environment backupctl passes; ssh and the stream never see a secret of it
+	resticEnv := os.Environ()
 	for _, kv := range os.Environ() {
 		if k, _, _ := strings.Cut(kv, "="); secretName(k) {
 			os.Unsetenv(k)
@@ -56,40 +61,38 @@ func cmdPieces(args []string, e env) int {
 		fmt.Fprintf(e.stderr, "restic-pve pieces: %v\n", err)
 		return prun.CodeUsage
 	}
-	if j.Mode != prun.ModeProbe {
-		fmt.Fprintf(e.stderr, "restic-pve pieces: mode %s is not in this release; it runs the probe (mode probe) only. Nothing was changed.\n", j.Mode)
-		return prun.CodeUsage
+	re := prun.Env{State: e.getenv(role.StateEnv), Stderr: e.stderr, Restic: &pieces.Restic{Env: resticEnv}, Producer: "restic-pve " + version}
+	runJob, what := prun.Run, "guest backup"
+	if j.Mode == prun.ModeProbe {
+		runJob, what = prun.Probe, "probe"
 	}
-	re := prun.Env{State: e.getenv(role.StateEnv), Stderr: e.stderr}
-	if e.plain(false) {
-		res := prun.Probe(context.Background(), re, j)
-		fmt.Fprintln(e.stdout, res.Message)
-		return res.Code
+	var screen tcell.Screen
+	if !e.plain(false) {
+		screen, err = e.newScreen()
 	}
-	screen, err := e.newScreen()
-	if err != nil {
-		res := prun.Probe(context.Background(), re, j)
+	if screen == nil || err != nil {
+		res := runJob(context.Background(), re, j)
 		fmt.Fprintln(e.stdout, res.Message)
 		return res.Code
 	}
 	var held lockedBuffer
 	re.Stderr = &held
 	done := make(chan prun.Result, 1)
-	go func() { done <- prun.Probe(context.Background(), re, j) }()
+	go func() { done <- runJob(context.Background(), re, j) }()
 	stop := restoreOnSignal(screen)
 	verr := watch.Run(screen, watch.Options{Dir: j.ViewDir, Color: e.getenv("NO_COLOR") == "", Follow: true,
-		Words: watch.Words{Title: title("probe"), Start: "restic-pve pieces --job " + *jobFile}})
+		Words: watch.Words{Title: title(what), Start: "restic-pve pieces --job " + *jobFile}})
 	screen.Fini()
 	stop()
 	var res prun.Result
 	select {
 	case res = <-done:
 	default:
-		fmt.Fprintln(e.stdout, "the view was left; the probe goes on until it ends")
+		fmt.Fprintln(e.stdout, "the view was left; the "+what+" goes on until it ends")
 		select {
 		case res = <-done:
 		case <-time.After(time.Until(j.DeadlineTime()) + time.Minute):
-			fmt.Fprintln(e.stderr, "restic-pve pieces: the probe did not end before its deadline")
+			fmt.Fprintln(e.stderr, "restic-pve pieces: the "+what+" did not end before its deadline")
 			return prun.CodeSource
 		}
 	}

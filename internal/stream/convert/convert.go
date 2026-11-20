@@ -7,9 +7,12 @@
 // on a match. ToVMA withholds the final VMA extent until then. ToRaw renames
 // its files to *.raw.invalid on any failure.
 //
-// Error classes: rvs.ErrIntegrity (malformed stream, digest mismatch, doubly
-// patched position, non-zero placeholder; CLI exit 3), verify.ErrManifest
-// (manifest mismatch; exit 8) and ErrLocalIO (input read, output write and
+// VerifyPieces, ToVMAPieces and ToRawPieces read the tar of a snapshot in the
+// piece layout instead (pieces.go) and check each piece and sha256pt.
+//
+// Error classes: rvs.ErrIntegrity (malformed stream or tar, digest mismatch, doubly
+// patched position, non-zero placeholder; CLI exit 3), verify.ErrManifest or
+// pieces.ErrManifest (manifest mismatch; exit 8), and ErrLocalIO (input read, output write and
 // output directory errors; exit 7). Anything else is an internal error.
 package convert
 
@@ -19,6 +22,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/norandom/restic-pve/internal/pieces"
 	"github.com/norandom/restic-pve/internal/stream/reorder"
 	"github.com/norandom/restic-pve/internal/stream/rvs"
 	"github.com/norandom/restic-pve/internal/stream/verify"
@@ -50,6 +54,9 @@ func integrity(format string, a ...any) error {
 type Options struct {
 	// Manifest, when set, must match the trailer (devices, sizes, digests).
 	Manifest *verify.Manifest
+	// Pieces, when set, must match the manifest inside a pieces snapshot (disks, sizes,
+	// sha256pt); pieces input only.
+	Pieces *pieces.Manifest
 }
 
 // Result describes a verified stream.

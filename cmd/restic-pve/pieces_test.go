@@ -28,8 +28,8 @@ func TestPiecesUsageAndRefusals(t *testing.T) {
 		`"restic_host":"b","tags":[],"info":{},"view_dir":"/v","progress_interval_s":30,"deadline":"2026-11-21T03:00:00Z","full_check_every":7}`), 0o600)
 	errb.Reset()
 	if code := run([]string{"pieces", "--job", job}, sys(role.Backup, &out, &errb)); code != 64 ||
-		!strings.Contains(errb.String(), "mode auto is not in this release; it runs the probe (mode probe) only. Nothing was changed.") {
-		t.Fatalf("mode auto: %d %q", code, errb.String())
+		!strings.Contains(errb.String(), `"code":64`) || !strings.Contains(out.String(), "info needs status, disks and pve_version") {
+		t.Fatalf("mode auto without info: %d %q %q", code, errb.String(), out.String())
 	}
 	os.WriteFile(job, []byte(`{"schema":1}`), 0o600)
 	errb.Reset()

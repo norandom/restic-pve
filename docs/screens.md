@@ -41,6 +41,15 @@ quit. Plain lines: `--plain`.
 
 ![Status with one source too old and the command that fixes it](img/status-warning.png)
 
+When a guest reads only its changed blocks, a box "Guests that read only changes" under the
+copies shows two lines per guest: the kind of the last run (`changes`, `full read` or
+`full check`) with what was read from the Proxmox host and skipped as unchanged, for example
+`changes: read 1.2 GiB, skipped 123.8 GiB (unchanged)`, then its time and the last full check,
+`full check: ok 2026-11-27`. A guest whose full check found a difference comes first, with the
+fault in the error colours and the command that clears it. The copies keep their rows: when
+there is no room, the title says how many guests show and Enter lists them all. In the plain
+lines these are the `reads` and `fault` lines.
+
 ### Keys: `restic-pve keys`
 
 Keys: `p` prove your password copy, `q` quit (or back to status). Any key closes the proof box.
@@ -60,6 +69,11 @@ Keys: Enter all rows, `r` read the storage again, `q` quit (or back to status). 
 ![Space: storage, backups and keep rules, no warning](img/space.png)
 
 ![Space with the warning: free space low, and what to do](img/space-warning.png)
+
+When a guest reads only changes, the Storage box adds the working space of those runs on this
+machine: `Pieces working space: 1 GiB in total (web 1 GiB, db 16 KiB) in /state/pieces, 812 GiB
+free`. It counts what the pieces in flight take on disk; the placeholders of unchanged pieces
+take nothing. In the plain lines it is the `work` line.
 
 ### Watch: `restic-pve watch`
 

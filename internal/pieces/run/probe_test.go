@@ -29,6 +29,9 @@ func TestMain(m *testing.M) {
 }
 
 func fakeHost(c, state string, args []string) int {
+	if c == "image" {
+		return imageHost(state, args)
+	}
 	os.WriteFile(filepath.Join(state, "ssh.argv"), []byte(strings.Join(args, " ")+"\n"), 0o644)
 	os.WriteFile(filepath.Join(state, "ssh.env"), []byte(strings.Join(os.Environ(), "\n")), 0o644)
 	log := func(s string) { fmt.Fprintln(os.Stderr, s) }

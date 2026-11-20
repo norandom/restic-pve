@@ -1,13 +1,13 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strconv"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +16,7 @@ import (
 	"github.com/norandom/restic-pve/internal/stream/blockmap"
 	"github.com/norandom/restic-pve/internal/stream/changes"
 	"github.com/norandom/restic-pve/internal/stream/source"
+	"github.com/norandom/restic-pve/internal/stream/vma"
 )
 
 // Exit codes and result codes of the pieces command (the stream contract's, plus 79).
@@ -34,6 +35,14 @@ type Env struct {
 	Stderr     io.Writer // the JSON lines and the result line
 	Now        func() time.Time
 	SSHProgram string // "" is ssh, found in PATH
+
+	// The stored runs (Run) only.
+	Restic     *pieces.Restic               // restic with backupctl's environment
+	FreeSpace  func(string) (uint64, error) // nil: pieces.FreeSpace
+	BatchBytes uint64                       // 0: pieces.BatchSize of the free space
+	Producer   string                       // the manifest's producer; "" is restic-pve dev
+
+	beforeBatch func(root string) // tests: called before each restic batch
 }
 
 func (e Env) now() time.Time {
@@ -54,23 +63,25 @@ type Disk struct {
 type Fallback struct {
 	Reason   string `json:"reason"`
 	Expected bool   `json:"expected"`
+	Line     string `json:"line"` // the plain line of the design's fall back table
 }
 
 // Result is the last stderr line of the pieces command.
 type Result struct {
-	Type         string    `json:"type"`
-	Status       string    `json:"status"`
-	Code         int       `json:"code"`
-	Transient    bool      `json:"transient"`
-	Message      string    `json:"message"`
-	Snapshot     *string   `json:"snapshot"`
-	Kind         string    `json:"kind"`
-	ReadBytes    uint64    `json:"read_bytes"`
-	SkippedBytes uint64    `json:"skipped_bytes"`
-	StoredBytes  uint64    `json:"stored_bytes"`
-	Disks        []Disk    `json:"disks"`
-	Fallback     *Fallback `json:"fallback"`
-	Check        string    `json:"check"`
+	Type         string        `json:"type"`
+	Status       string        `json:"status"`
+	Code         int           `json:"code"`
+	Transient    bool          `json:"transient"`
+	Message      string        `json:"message"`
+	Snapshot     *string       `json:"snapshot"`
+	Kind         string        `json:"kind"`
+	ReadBytes    uint64        `json:"read_bytes"`
+	SkippedBytes uint64        `json:"skipped_bytes"`
+	StoredBytes  uint64        `json:"stored_bytes"`
+	Disks        []Disk        `json:"disks"`
+	Fallback     *Fallback     `json:"fallback"`
+	Check        string        `json:"check"`
+	Fault        *pieces.Fault `json:"fault"` // the difference a full check of this run found
 }
 
 // events writes the JSON lines of the vzdump log the way `stream backup` does: the
@@ -80,6 +91,7 @@ type events struct {
 	mu       sync.Mutex
 	w        io.Writer
 	once     sync.Once
+	skip     bool   // a provider job of a stored run: its consistency is not the snapshot's
 	notReady string // the host's "plug-in not ready: ..." line, which says what to do
 }
 
@@ -94,6 +106,9 @@ func (e *events) emit(v any) {
 }
 
 func (e *events) Consistency(value, detail string) {
+	if e.skip {
+		return
+	}
 	e.once.Do(func() {
 		e.emit(struct {
 			Type   string `json:"type"`
@@ -106,7 +121,7 @@ func (e *events) Consistency(value, detail string) {
 func (e *events) VzdumpLine(level, line string) {
 	if _, after, ok := strings.Cut(line, "plug-in not ready: "); ok {
 		e.mu.Lock()
-		e.notReady = "the Proxmox plug-in is not ready: " + after
+		e.notReady = after
 		e.mu.Unlock()
 	}
 	e.emit(struct {
@@ -150,30 +165,135 @@ func fromSource(err error) (int, bool, string) {
 	return CodeSource, false, err.Error()
 }
 
-// viewMap is the probe's map: every 4 MiB piece of all disks one after the other, grouped to
-// at most blockmap.MaxCells cells; a cell is "=" when all its pieces are unchanged, "?" when
-// one of them would be read by the next run.
-func viewMap(devs []changes.Device, maps map[uint8]*changes.Map) []byte {
-	var marks []bool // true: the next run reads it
-	for _, d := range devs {
-		m := maps[d.ID]
-		for i := uint64(0); i < pieces.Pieces(d.Size); i++ {
-			marks = append(marks, m == nil || !m.Recorded || m.Dirty(i))
-		}
-	}
+// cells groups one mark per piece (of all disks, one after the other) into at most
+// blockmap.MaxCells cells; a cell shows the least advanced of its pieces: "?" unread, "o" read,
+// "#" handed to restic, "=" unchanged.
+func cells(marks []byte) []byte {
 	n := len(marks)
-	cells := min(n, blockmap.MaxCells)
-	out := make([]byte, cells)
-	for c := range cells {
+	k := min(n, blockmap.MaxCells)
+	out := make([]byte, k)
+	for c := range k {
 		out[c] = blockmap.CellKept
-		for i := c * n / cells; i < (c+1)*n/cells; i++ {
-			if marks[i] {
-				out[c] = blockmap.CellUnread
-				break
+		for _, m := range marks[c*n/k : (c+1)*n/k] {
+			if strings.IndexByte("=#o?", m) > strings.IndexByte("=#o?", out[c]) {
+				out[c] = m
 			}
 		}
 	}
 	return out
+}
+
+// view is the block view of one run: one mark per piece, the publisher, progress lines.
+type view struct {
+	mu    sync.Mutex
+	pub   *blockmap.Publisher
+	ev    *events
+	st    blockmap.State
+	now   func() time.Time
+	every time.Duration
+	marks []byte
+	first map[string]int // a disk's first piece in marks
+	shown time.Time      // last map published
+	prog  time.Time      // last progress line
+}
+
+func newView(e Env, j *Job, ev *events, kind string) *view {
+	v := &view{ev: ev, now: e.now, every: time.Duration(j.ProgressInterval) * time.Second, first: map[string]int{}}
+	v.st = blockmap.State{VMID: j.VMID, Name: j.Alias, Mode: kind, Kind: kind, Status: blockmap.Running, Started: e.now()}
+	v.pub = blockmap.Start(blockmap.Options{Dir: j.ViewDir, VMID: j.VMID, Now: e.Now, Logf: func(msg string) {
+		ev.emit(struct {
+			Type    string `json:"type"`
+			Level   string `json:"level"`
+			Message string `json:"message"`
+		}{"view", "debug", msg})
+	}})
+	v.prog = v.st.Started
+	v.update(func(*blockmap.State) {})
+	return v
+}
+
+// begin starts a new map of kind over the disks, every piece marked c (a fall back starts a
+// full map).
+func (v *view) begin(kind string, disks []vma.DevInfo, c byte) {
+	v.update(func(s *blockmap.State) {
+		s.Kind, s.Mode, s.Disk, s.Read, s.Skipped, s.Records, v.marks = kind, kind, 0, 0, 0, nil, nil
+		for _, d := range disks {
+			v.first[d.Name] = len(v.marks)
+			v.marks = append(v.marks, bytes.Repeat([]byte{c}, int(pieces.Pieces(d.Size)))...)
+			s.Disk += d.Size
+		}
+	})
+}
+
+// mark sets piece i of dev to c; read bytes came from the host, skipped were not read.
+func (v *view) mark(dev string, i uint64, c byte, read, skipped uint64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if p, ok := v.first[dev]; ok && p+int(i) < len(v.marks) {
+		v.marks[p+int(i)] = c
+	}
+	v.st.Read += read
+	v.st.Skipped += skipped
+	if now := v.now(); now.Sub(v.shown) >= blockmap.Interval {
+		v.publish(now)
+	}
+	if now := v.now(); now.Sub(v.prog) >= v.every {
+		v.prog = now
+		v.progress(dev)
+	}
+}
+
+// update changes the state and publishes it.
+func (v *view) update(f func(*blockmap.State)) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	f(&v.st)
+	v.publish(v.now())
+}
+
+func (v *view) publish(now time.Time) { // with mu held
+	v.shown = now
+	s := v.st
+	s.Updated, s.Map = now, cells(v.marks)
+	v.pub.Set(&s)
+}
+
+// progress writes a progress line: pieces passed (read or skipped) of all disks.
+func (v *view) progress(dev string) { // with mu held
+	done, pct := v.st.Read+v.st.Skipped, 100.0
+	if v.st.Disk > 0 {
+		pct = math.Round(float64(done)*1000/float64(v.st.Disk)) / 10
+	}
+	v.ev.emit(struct {
+		Type       string  `json:"type"`
+		Dev        string  `json:"dev"`
+		BytesDone  uint64  `json:"bytes_done"`
+		TotalBytes uint64  `json:"total_bytes"`
+		Percent    float64 `json:"percent"`
+		RAMBytes   int64   `json:"ram_bytes"`
+		Patches    uint64  `json:"patches"`
+	}{"progress", dev, done, v.st.Disk, pct, 0, 0})
+}
+
+// finish ends the view and writes the result line.
+func finish(e Env, v *view, res Result) Result {
+	res.Status = "ok"
+	if res.Code != CodeOK {
+		res.Status = "error"
+	}
+	if v != nil { // nil: the single stream writes its own view
+		v.mu.Lock()
+		s := v.st
+		s.Status, s.Message, s.Updated, s.Map = blockmap.Done, res.Message, e.now(), cells(v.marks)
+		if res.Code != CodeOK {
+			s.Status = blockmap.Failed
+		}
+		v.mu.Unlock()
+		v.pub.Close(&s, 5*time.Second)
+	}
+	b, _ := json.Marshal(res)
+	e.Stderr.Write(append(b, '\n'))
+	return res
 }
 
 func size(b uint64) string {
@@ -193,138 +313,56 @@ func size(b uint64) string {
 func Probe(ctx context.Context, e Env, j *Job) Result {
 	ctx, cancel := context.WithDeadline(ctx, j.DeadlineTime())
 	defer cancel()
-	ev := &events{w: e.Stderr}
-	started := e.now()
-	base := blockmap.State{VMID: j.VMID, Name: j.Alias, Mode: "probe", Kind: blockmap.KindProbe, Status: blockmap.Running, Started: started}
-	pub := blockmap.Start(blockmap.Options{Dir: j.ViewDir, VMID: j.VMID, Now: e.Now, Logf: func(msg string) {
-		ev.emit(struct {
-			Type    string `json:"type"`
-			Level   string `json:"level"`
-			Message string `json:"message"`
-		}{"view", "debug", msg})
-	}})
-	first := base
-	first.Updated = started
-	pub.Set(&first)
-	res := Result{Type: "result", Kind: "probe", Check: "none", Disks: []Disk{}}
-	final := base
-	end := func(code int, transient bool, msg string) Result {
-		ev.mu.Lock()
-		if code == CodeNotReady && ev.notReady != "" {
-			msg = ev.notReady
-		}
-		ev.mu.Unlock()
-		res.Code, res.Transient, res.Message = code, transient, msg
-		res.Status = "ok"
-		final.Status = blockmap.Done
-		if code != CodeOK {
-			res.Status, final.Status, final.Message = "error", blockmap.Failed, msg
-		}
-		final.Updated = e.now()
-		pub.Close(&final, 5*time.Second)
-		b, _ := json.Marshal(res)
-		e.Stderr.Write(append(b, '\n'))
-		return res
-	}
-
-	vmid := strconv.FormatUint(uint64(j.VMID), 10)
-	rd, w, err := source.Open(ctx, source.Options{SSHConfig: j.SSHConfig, Host: j.SSHHost, VMID: j.VMID, SSHProgram: e.SSHProgram,
-		Request: []string{"changes", vmid, changes.ModeProbe}, Ack: true, Env: SafeEnv(os.Environ())}, ev)
+	r := &runner{ctx: ctx, e: e, j: j, ev: &events{w: e.Stderr}, recPath: pieces.RecordFile(e.State, j.Alias),
+		res: Result{Type: "result", Kind: "probe", Check: "none", Disks: []Disk{}}}
+	r.v = newView(e, j, r.ev, blockmap.KindProbe)
+	v, res := r.v, &r.res
+	jb, err := r.startJob(changes.ModeProbe)
 	if err != nil {
-		code, tr, msg := fromSource(err)
-		return end(code, tr, msg)
+		return r.fail(err)
 	}
-	proc := w.(*source.Process)
-	stdin := proc.Stdin()
-	defer stdin.Close()
-	dec := changes.NewDecoder(rd)
-	var h *changes.Header
 	maps := map[uint8]*changes.Map{}
-	var derr error
-	for {
-		f, err := dec.Next()
-		if err != nil {
-			derr = err
-			break
-		}
-		if f.Header != nil {
-			h = f.Header
-			if h.VMID != j.VMID || h.Mode != changes.ModeProbe {
-				derr = fmt.Errorf("the host answered for VM %d in mode %s", h.VMID, h.Mode)
-				break
-			}
-		}
-		if f.Map != nil {
-			m := *f.Map
-			maps[m.Dev] = &m
-		}
-		if f.End != nil {
-			break
-		}
+	if err := jb.frames(func(m changes.Map) error { maps[m.Dev] = &m; return nil }, nil); err != nil {
+		return r.fail(err)
 	}
-	if derr != nil {
-		if h != nil { // tell the host this job failed; Proxmox keeps the record
-			if line, err := (changes.Ack{Token: h.Token, Verb: changes.VerbFail, Reason: "the probe stream was not complete"}).Line(); err == nil {
-				io.WriteString(stdin, line)
-			}
-		}
-		stdin.Close()
-		// the host side ended first (ssh lost, plug-in not ready, vzdump failed): its reason
-		// wins over the cut stream; otherwise the stream itself broke a rule
-		if werr := w.Wait(); werr != nil && !strings.Contains(werr.Error(), "source aborted") {
-			code, tr, msg := fromSource(werr)
-			return end(code, tr, msg)
-		}
-		proc.Abort()
-		return end(CodeStream, false, "changes stream: "+derr.Error())
-	}
+	h := jb.h
 
 	// what Proxmox reported, per disk
-	var skipped, disk uint64
+	devs := make([]vma.DevInfo, 0, len(h.Devices))
+	for _, d := range h.Devices {
+		devs = append(devs, vma.DevInfo{ID: d.ID, Name: d.Name, Size: d.Size})
+	}
+	v.begin(blockmap.KindProbe, devs, blockmap.CellUnread)
 	var parts []string
 	for _, d := range h.Devices {
 		m := maps[d.ID]
-		disk += d.Size
 		var dirty, changed uint64
 		if m != nil && m.Recorded {
 			for i := uint64(0); i < pieces.Pieces(d.Size); i++ {
 				if m.Dirty(i) {
 					changed++
 					dirty += pieces.PieceLen(d.Size, i)
+				} else {
+					v.mark(d.Name, i, blockmap.CellKept, 0, pieces.PieceLen(d.Size, i))
 				}
 			}
-			skipped += d.Size - dirty
 			parts = append(parts, fmt.Sprintf("%s record reuse, %s changed of %s", d.Name, size(dirty), size(d.Size)))
 		} else {
 			dirty = d.Size
 			parts = append(parts, fmt.Sprintf("%s record %s (the next run reads it in full)", d.Name, d.Bitmap))
 		}
 		res.Disks = append(res.Disks, Disk{Name: d.Name, Record: d.Bitmap, DirtyBytes: dirty})
-		final.Records = append(final.Records, blockmap.Record{Disk: d.Name, State: d.Bitmap, Changed: changed, Pieces: pieces.Pieces(d.Size)})
+		v.update(func(s *blockmap.State) {
+			s.Records = append(s.Records, blockmap.Record{Disk: d.Name, State: d.Bitmap, Changed: changed, Pieces: pieces.Pieces(d.Size)})
+			res.SkippedBytes = s.Skipped
+		})
 	}
-	res.SkippedBytes = skipped
-	final.Disk, final.Skipped, final.Map = disk, skipped, viewMap(h.Devices, maps)
 
 	// the record state first, then the ack: nothing is stored, the record moved past any base
-	rec := pieces.LoadRecord(pieces.RecordFile(e.State, j.Alias), j.VMID)
-	rec.Probe(h.Token)
-	line, _ := (changes.Ack{Token: h.Token, Verb: changes.VerbProbe}).Line()
-	if err := pieces.Commit(pieces.RecordFile(e.State, j.Alias), rec, line, stdin); err != nil {
-		if l, e2 := (changes.Ack{Token: h.Token, Verb: changes.VerbFail, Reason: "the record state could not be written"}).Line(); e2 == nil {
-			io.WriteString(stdin, l)
-		}
-		stdin.Close()
-		w.Wait()
-		return end(CodeLocalIO, false, "record state: "+err.Error())
+	r.rec = pieces.LoadRecord(r.recPath, j.VMID)
+	r.rec.Probe(h.Token)
+	if err := r.commit(jb, changes.Ack{Token: h.Token, Verb: changes.VerbProbe}); err != nil {
+		return r.fail(err)
 	}
-	stdin.Close()
-	eofErr := dec.CheckEOF()
-	if werr := w.Wait(); werr != nil {
-		code, tr, msg := fromSource(werr)
-		return end(code, tr, msg)
-	}
-	if eofErr != nil {
-		return end(CodeStream, false, "changes stream: "+eofErr.Error())
-	}
-	return end(CodeOK, false, "probe: "+strings.Join(parts, "; ")+"; nothing was read or stored")
+	return r.end(CodeOK, false, "probe: "+strings.Join(parts, "; ")+"; nothing was read or stored")
 }

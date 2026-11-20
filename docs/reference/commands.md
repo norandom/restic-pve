@@ -158,12 +158,12 @@ update counts as done either way; the next
 
 | Command | Who | What |
 |---|---|---|
-| `stream backup\|verify\|to-vma\|to-raw` | the backup machine's control code | the stream program, see [stream-contract.md](stream-contract.md) |
+| `stream backup\|verify\|to-vma\|to-raw` | the backup machine's control code | the stream program, see [stream-contract.md](stream-contract.md); `verify`, `to-vma` and `to-raw` read a pieces snapshot with `--pieces` |
 | `status [--plain]` | the admin, scripts | is there a recent copy away from the site, have I seen a restore work, what runs now and next |
 | `keys [--plain]` | the admin | every key of this machine, what it does, where it is, which one needs a copy away; `p` proves the password copy |
 | `space [--plain\|--check]` | the admin; `--check` the control code | storage space, backup sizes, keep rules, the warning rule |
 | `watch [--once]` | the admin | the guest backup that runs now as the block view, or the progress of a local source |
-| `pieces --job FILE` | the backup machine's control code; the operator for a probe | one guest run in the piece layout; this release runs the probe only |
+| `pieces --job FILE` | the backup machine's control code; the operator for a probe | one guest run in the piece layout: a probe (nothing stored) or a stored run |
 
 A wrong flag, or more than one flag, prints the usage line of that command (exit 64).
 
@@ -175,7 +175,7 @@ is shown and the read waits.
 
 | Variable | Read by | Meaning, example |
 |---|---|---|
-| `RESTIC_PVE_STATE` | all | state root: `records.json`, `status.json`, `jobs/<name>.json` and `.lock`, `run.lock`, `guests/` for the guest profile, `status-cache.json` (written), `password-escrow-confirmed` (written by the proof); `/state` |
+| `RESTIC_PVE_STATE` | all | state root: `records.json`, `status.json`, `jobs/<name>.json` and `.lock`, `run.lock`, `guests/` for the guest profile, `status-cache.json` (written), `password-escrow-confirmed` (written by the proof), `pieces/` (the record states `<alias>.record.json` and the guests' working folders); `/state` |
 | `BACKUP_CONFIG` | status, space (required), keys (if set) | `backup.toml`: `[repository] base`, `[[source]]`, `[retention]`, `keep_last`, `[alerts] stale_days`, `[schedule]`; `/app/config/backup.toml` |
 | `RESTIC_PASSWORD` | status, space (required, not for `--check`), keys | the password in use, passed to restic in its environment only |
 | `RESTIC_REPOSITORY_BASE` | status, keys, space | overrides `[repository] base` |
@@ -193,7 +193,10 @@ that names it and gives an example.
 `status --plain` (or no terminal, `TERM=dumb`, a terminal below 60x20) prints one fact per line,
 words separated by two spaces: `copy <instance> yes|no|unknown <age> ...`, `restore-test`,
 `drill`, `running`, `last-job`, `next`, `space`, `updates`, `alerts`, `password-proof`,
-`problem`, `verdict safe|not-safe|unknown`. Exit codes: 0 every source and guest is safe, 1 at
+`problem`, `verdict safe|not-safe|unknown`. For each guest that reads only changes it adds,
+after the `copy` lines, `reads <alias> changes|full|check|none [ended <time>] [read <size>]
+[skipped <size>] full-check ok|difference <date>|none`, and for a guest whose full check found a
+difference `fault <alias> <date> <n> pieces <disks> do: <command>`. Exit codes: 0 every source and guest is safe, 1 at
 least one is not safe or not known, 64 usage, 78 a variable is missing or the config cannot be
 read. The full screen exits with the same code and prints the verdict line when it closes.
 
@@ -203,9 +206,24 @@ read. The full screen exits with the same code and prints the verdict line when 
 terminal is needed; on a terminal it offers the proof (`p` and Enter), reads the copy without
 echo, and exits 0 when the copy is proven, 1 when not.
 
+The guests that read only changes come from two files: the record state
+`<RESTIC_PVE_STATE>/pieces/<alias>.record.json` (last full check and its result, a fault) and
+the key `guest_runs` of `<RESTIC_PVE_STATE>/guests/records.json`, which the control code writes
+from the result line of each stored pieces run:
+
+```json
+"guest_runs": {"web": {"ended": "2026-11-27T05:04:00Z", "kind": "changes",
+                       "read_bytes": 1288490188, "skipped_bytes": 132929658470}}
+```
+
+A guest with neither file is not listed.
+
 ### space
 
-`space --plain` prints the space facts. `space --check` reads the free space with one
+`space --plain` prints the space facts. When `<RESTIC_PVE_STATE>/pieces` exists it adds
+`work <folder> total <size> <alias> <size> ... free <size>`: the space the pieces runs take
+there (allocated bytes, so placeholders count nothing), per guest folder and in total, and the
+free space of that file system. `space --check` reads the free space with one
 `rclone about` (never restic) and prints one line: exit 0 no warning, 1 warning (free below twice
 the largest recent run, or below a tenth of the total), 2 not known.
 
@@ -231,8 +249,9 @@ JSON, schema 1, at most 1 MiB, every field known:
  "deadline":"2026-11-21T03:00:00Z","full_check_every":7}
 ```
 
-`mode` is `probe`, `auto` or `full-check`; this release runs `probe` only and refuses the others
-with exit 64 and nothing changed. A broken job file is exit 64 with the field named.
+`mode` is `probe`, `auto` (a stored run; the command chooses which) or `full-check` (a stored
+run that is a full check). `info` is the JSON of `request info` (`status`, `disks`,
+`pve_version` are read). A broken job file is exit 64 with the field named.
 
 The probe runs `ssh -F <ssh_config> -T -o BatchMode=yes <ssh_host> changes <vmid> probe` with
 every variable that holds or points to a secret removed from ssh's environment. It reads the
@@ -247,7 +266,7 @@ with the result line on stderr:
  "message":"probe: drive-efidisk0 record reuse, 0 KiB changed of 528 KiB; drive-scsi0 record reuse, 388 MiB changed of 32.0 GiB; nothing was read or stored",
  "snapshot":null,"kind":"probe","read_bytes":0,"skipped_bytes":33953431552,"stored_bytes":0,
  "disks":[{"name":"drive-efidisk0","record":"reuse","dirty_bytes":0},{"name":"drive-scsi0","record":"reuse","dirty_bytes":406847488}],
- "fallback":null,"check":"none"}
+ "fallback":null,"check":"none","fault":null}
 ```
 
 `record` is what Proxmox reported per disk: `reuse` (a record exists; `dirty_bytes` is what it
@@ -262,6 +281,77 @@ Proxmox plug-in is not ready (the message says what to do on the host).
 On a terminal the block view of the probe shows while it runs and after it ends, until `q`; the
 JSON lines follow on stderr when the view is left, and the result message on stdout. Without a
 terminal (or `TERM=dumb`, a small terminal) only the result message goes to stdout.
+
+#### Stored runs (`auto`, `full-check`)
+
+restic runs as a child, `nice -n 19 ionice -c 3 restic --retry-lock 30m --json ...`, with the
+environment the command was started with (repository, password file, rclone; `restic` from
+`PATH`); ssh and the stream code get that environment with every secret removed. Paths, below
+`RESTIC_PVE_STATE` (`/state`):
+
+| Path | What |
+|---|---|
+| `pieces/<alias>/vm-<vmid>` | the tree, the snapshot path of the piece layout; rebuilt from the parent at every run |
+| `pieces/<alias>/.staging` | read pieces before their batch; at most two batches |
+| `pieces/<alias>.record.json` | the record state: what the backup machine knows of Proxmox's change record |
+| `pieces/<alias>.rvs-manifest.json` | the manifest of a single-stream fall back (written only then) |
+
+The run is chosen from the record state, `info`, and the newest snapshot of the job's tags, and
+once more when Proxmox's header arrives:
+
+| Run | When | Requests | Result `kind` |
+|---|---|---|---|
+| changed blocks | the newest backup is the record's base, a usable pieces snapshot, every disk `reuse`, sizes, disk set and Proxmox version unchanged | `changes <vmid> use`, `ack ok <id>` after acceptance | `changes` |
+| arm and full read | first run, record gone, something changed, the newest backup not in the piece layout, failed checks | `changes <vmid> use` acked `arm`, or `changes <vmid> new` acked `arm`; then `dump <vmid>` | `full` |
+| full read | guest stopped, a fault set, the plug-in not ready (79) | `dump <vmid>` only | `full` |
+| full check | the seventh successful run (`full_check_every`), or mode `full-check` | `dump <vmid>`, then `changes <vmid> use` | `check` |
+| single stream | the state file system has less than 576 MiB free | `dump <vmid>` into `restic backup --stdin` (RVS1, `/<alias>/vm-<vmid>.rvs`) | `full` |
+
+A full read puts the VMA clusters together into 4 MiB pieces (in any order; zero clusters stay
+holes); a piece equal to the parent's stays a placeholder. A full check accepts the full read
+(kind `check`, parent the base), then compares every piece Proxmox's map leaves out with the
+base, disk by disk: all equal, the changed pieces are stored on the full read (`check` `ok`,
+message `full check: ok`); a difference acks `fail`, keeps the full read as the newest backup,
+sets the fault in the record state (the `fault` field of the result) and every later run reads
+in full until `--clear-fault`. Failed checks C1-C3 in a changed-blocks run forget the run's
+snapshots, ack `fail` and arm and read in full in the same run, without a parent; failing again
+ends the run (exit 3). A failure before the ack (lost ssh among them) stores nothing: the run's
+snapshots are forgotten and Proxmox keeps its record.
+
+Each fall back names its reason in `fallback` with exactly one line (also the message of a
+successful run):
+
+| `reason` | `line` | `expected` |
+|---|---|---|
+| `first-run` | `full read: first run with changed reads; the next run reads only changes` | true |
+| `stopped` | `full read: the guest is stopped` | true |
+| `record-gone` | `full read: Proxmox has no record of changes (guest restarted, stopped or a disk changed); the next run reads only changes` | true |
+| `check-due` | `full check: reading the whole disk to compare` | true |
+| `disks-changed`, `size-changed`, `pve-changed` | `full read: <what> changed since the last backup; the next run reads only changes` | true |
+| `not-pieces` | `full read: the last backup is not in the piece layout` | true |
+| `not-ready` | `full read: the Proxmox plug-in is not ready (<reason>); run restic-pve install on the Proxmox host` | false |
+| `checks-failed` | `full read: the changed-blocks run did not pass its checks (<check>); this run reads the whole disk` | false |
+| `no-space` | `full read as a single stream: <state> has <n> free, pieces need <m>` | false |
+| `fault` | `full read: full check found a difference on <date>; run ./backup.sh <source> --clear-fault <alias> after looking at it` | false |
+
+The result line (last stderr line):
+
+```json
+{"type":"result","status":"ok","code":0,"transient":false,
+ "message":"read 12 MiB, skipped 31.9 GiB (unchanged), 2 min",
+ "snapshot":"<64 hex>","kind":"changes","read_bytes":12582912,"skipped_bytes":34246082560,"stored_bytes":12582912,
+ "disks":[{"name":"drive-efidisk0","record":"reuse","dirty_bytes":0},{"name":"drive-scsi0","record":"reuse","dirty_bytes":12582912}],
+ "fallback":null,"check":"none","fault":null}
+```
+
+`read_bytes` is what came from the host, `stored_bytes` what was handed to restic (pieces that
+differ from the parent), `skipped_bytes` what was not read. `fault` is
+`{"date","disks","pieces"}` only in the run whose full check found the difference. Before it:
+`progress` lines (`bytes_done` counts pieces read or skipped), one `consistency` line (that of
+the stored snapshot's source) and `vzdump` warn and error lines, as `stream backup` writes them.
+Codes: 0 ok, 3 the stream or a check broke a rule (twice for checks), 6 ssh or the Proxmox side
+failed (`transient` as for `stream backup`), 7 restic or local I/O, 64 job file. The single
+stream ends with the stream's own code.
 
 ## Both roles
 
