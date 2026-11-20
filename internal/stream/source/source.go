@@ -329,3 +329,26 @@ func (w *lineWriter) flush() {
 		w.buf = nil
 	}
 }
+
+// SecretName reports whether an environment variable holds, or points to, a secret: a
+// password, passphrase, token, key, webhook or credentials. ssh and the stream need none.
+func SecretName(k string) bool {
+	k = strings.ToUpper(k)
+	for _, s := range []string{"PASSWORD", "PASSPHRASE", "SECRET", "TOKEN", "WEBHOOK", "CREDENTIAL"} {
+		if strings.Contains(k, s) {
+			return true
+		}
+	}
+	return strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_PASS")
+}
+
+// SafeEnv is env without the variables SecretName names.
+func SafeEnv(env []string) []string {
+	out := []string{}
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); !SecretName(k) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}

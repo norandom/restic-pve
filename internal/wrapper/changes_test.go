@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -189,13 +190,16 @@ func ackLine(v changes.Verb) func(h *changes.Header) string {
 	}
 }
 
-// clean checks that a job left the host as it was: no socket and no job folder, the storage
-// entry untouched, the plug-in untouched, no qemu-server folder of ours, and the lock free.
+// clean checks that a job left the host as it was: no socket and nothing in the job folder
+// but the guests' last-job files, the storage entry untouched, the plug-in untouched, no
+// qemu-server folder of ours, and the lock free.
 func (f *fixture) clean(label string) {
 	f.t.Helper()
-	if _, err := os.Lstat(f.root(provider.RunDir)); err == nil {
-		ents, _ := os.ReadDir(f.root(provider.RunDir))
-		f.t.Errorf("%s: job folder left: %v", label, ents)
+	ents, _ := os.ReadDir(f.root(provider.RunDir))
+	for _, e := range ents {
+		if !regexp.MustCompile(`^job-[0-9]+$`).MatchString(e.Name()) {
+			f.t.Errorf("%s: left in the job folder: %s", label, e.Name())
+		}
 	}
 	if b, _ := os.ReadFile(f.root(provider.StorageConfig)); string(b) != storageCfg {
 		f.t.Errorf("%s: storage.cfg changed: %q", label, b)
@@ -307,6 +311,40 @@ func TestChangesUseReadsOnlyTheMarkedPieces(t *testing.T) {
 		t.Fatalf("stderr:\n%s", s.stderr)
 	}
 	f.clean("use")
+}
+
+// The header's prev is the token of the guest's last job that ended with a success ack (probe,
+// arm or ok), "" before the first; a job that failed leaves it as it was.
+func TestChangesPrev(t *testing.T) {
+	f := newFixture(t)
+	f.enable()
+	f.providerVzdump(jobSpec(true, [2]uint64{0, piece}))
+	prevIs := func(s stream, want string) {
+		t.Helper()
+		if s.h == nil || s.h.Prev == nil || *s.h.Prev != want {
+			t.Fatalf("prev %v, want %q\n%s", s.h, want, s.stderr)
+		}
+	}
+	s1 := f.job("changes 100 probe", false, ackLine(changes.VerbProbe))
+	prevIs(s1, "")
+	s2 := f.job("changes 100 use", false, ackLine(changes.VerbFail))
+	prevIs(s2, s1.h.Token)
+	if s2.code == 0 {
+		t.Fatal("a failed ack ended the job well")
+	}
+	s3 := f.job("changes 100 new", false, ackLine(changes.VerbArm))
+	prevIs(s3, s1.h.Token)
+	s4 := f.job("changes 100 use", false, ackLine(changes.VerbOK))
+	prevIs(s4, s3.h.Token)
+	s5 := f.job("changes 100 probe", false, ackLine(changes.VerbProbe))
+	prevIs(s5, s4.h.Token)
+	p := f.root(filepath.Join(provider.RunDir, "job-100"))
+	if st, err := os.Stat(p); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("last-job file: %v %v", st, err)
+	}
+	os.WriteFile(p, []byte("not a token\n"), 0o600)
+	prevIs(f.job("changes 100 probe", false, ackLine(changes.VerbProbe)), "")
+	f.clean("prev")
 }
 
 // Mode new, and mode use with a disk Proxmox has no record for: no map, no read, ack arm.

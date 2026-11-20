@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/norandom/restic-pve/internal/stream/rvs"
@@ -266,45 +264,4 @@ func ReadManifest(r io.Reader) (*Manifest, error) {
 		return nil, err
 	}
 	return &m, nil
-}
-
-// WriteManifestFile writes m to path atomically: a temporary file in the same directory (a
-// leading dot), fsync, mode 0644, rename, then a sync of the directory. Nothing is left
-// behind on failure.
-func WriteManifestFile(path string, m *Manifest) (err error) {
-	b, err := m.Encode()
-	if err != nil {
-		return err
-	}
-	dir, base := filepath.Split(path)
-	if dir == "" {
-		dir = "."
-	}
-	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("pieces: write manifest: %w", err)
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			f.Close()
-			os.Remove(tmp)
-		}
-	}()
-	for _, step := range []func() error{
-		func() error { _, e := f.Write(append(b, '\n')); return e },
-		func() error { return f.Chmod(0o644) },
-		f.Sync,
-		f.Close,
-		func() error { return os.Rename(tmp, path) },
-	} {
-		if err = step(); err != nil {
-			return fmt.Errorf("pieces: write manifest: %w", err)
-		}
-	}
-	if d, derr := os.Open(dir); derr == nil {
-		d.Sync()
-		d.Close()
-	}
-	return nil
 }

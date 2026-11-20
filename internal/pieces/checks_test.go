@@ -45,12 +45,27 @@ func newHarness(t *testing.T, size uint64) *harness {
 // inject is called with the batch and the store just before restic runs the batch.
 type inject func(b *Batch, s *Store)
 
+// The test seam of RunBatch: force adds --force to the next batch; skip replaces its checks.
+var (
+	force bool
+	skip  func() error
+)
+
+func init() {
+	batchSeam = func(s *Store, a *BackupArgs) func() error {
+		a.Force = a.Force || force
+		return skip
+	}
+}
+
 // run stores img through the writer: parent nil is a full read without parent; put lists the
 // pieces that arrive (nil: all of them). It returns the accepted id or the rejection, after
 // the run's snapshots were forgotten.
 func (h *harness) run(parent *Parent, img []byte, put []uint64, in inject) (string, *Store, error) {
 	h.t.Helper()
 	ctx := context.Background()
+	force, skip = false, nil
+	defer func() { force, skip = false, nil }()
 	s := &Store{R: h.r, Root: h.root, Host: h.hostname(), GuestTags: h.guest, PartialTags: h.partial}
 	kind := "full"
 	var parentID *string
@@ -111,8 +126,8 @@ func (h *harness) run(parent *Parent, img []byte, put []uint64, in inject) (stri
 		}
 	}
 	id, err := s.Accept(ctx, w.Stats().Kept, resized)
+	s.Discard(ctx)
 	if err != nil {
-		s.Discard(ctx)
 		return "", s, err
 	}
 	h.acceptedManifest = m
@@ -175,12 +190,13 @@ func TestStoreAcceptsAndRejectsB3(t *testing.T) {
 
 	// a first run: no parent, three batches of two pieces, all pieces real
 	h.batch = 2 * PieceSize
-	sa, s, err := h.run(nil, img, nil, nil)
+	runs := 0
+	sa, _, err := h.run(nil, img, nil, func(*Batch, *Store) { runs++ })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Runs() != 3 {
-		t.Fatalf("first run: %d batches, want 3", s.Runs())
+	if runs != 3 {
+		t.Fatalf("first run: %d batches, want 3", runs)
 	}
 	snaps := h.snapshots()
 	if len(snaps) != 1 || snaps[0].ID != sa {
@@ -229,7 +245,7 @@ func TestStoreAcceptsAndRejectsB3(t *testing.T) {
 	img3 := bytes.Clone(img2)
 	rng.Read(img3[4*PieceSize : 4*PieceSize+10]) // the run reads piece 4
 	c3 := func(s *Store) error {                 // C3 on the rejected batch snapshot, before it is forgotten
-		ch, err := h.r.Diff(ctx, sb, s.Batches()[len(s.Batches())-1], h.root)
+		ch, err := h.r.Diff(ctx, sb, s.batches[len(s.batches)-1], h.root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +257,7 @@ func TestStoreAcceptsAndRejectsB3(t *testing.T) {
 		c3          bool // C3 also catches it on the batch snapshot
 	}
 	cases := []tc{
-		{"force", "C1", func(b *Batch, s *Store) { s.force = true }, true},
+		{"force", "C1", func(b *Batch, s *Store) { force = true }, true},
 		{"wrong parent", "C1", func(b *Batch, s *Store) { s.prev = sa }, true},
 		{"touched placeholder", "C1", func(b *Batch, s *Store) {
 			p := filepath.Join(h.root, PiecePath("drive-scsi0", 2))
@@ -278,8 +294,7 @@ func TestStoreAcceptsAndRejectsB3(t *testing.T) {
 		var err3 error
 		h.run(pb, img3, []uint64{4}, func(b *Batch, s *Store) {
 			c.in(b, s)
-			s.skipChecks = true
-			s.after = func() { err3 = c3(s) }
+			skip = func() error { err3 = c3(s); return errors.New("checks skipped") }
 		})
 		if c.c3 && err3 == nil {
 			t.Errorf("%s: C3 did not catch it", c.name)

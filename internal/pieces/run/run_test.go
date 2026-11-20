@@ -32,9 +32,11 @@ import (
 // pieces written since the last successful provider job), and the two requests the backup
 // machine sends: "changes <vmid> probe|use|new" (a provider job: the changes stream, the ack;
 // the record moves on only after a success ack) and "dump <vmid>" (a VMA stream of the
-// images, clusters in an order that is not the disk order). Files in the state folder change
+// images, clusters in an order that is not the disk order). The host keeps the token of the
+// last job that succeeded ("prev") and sends it in the header. Files in the state folder change
 // its behaviour: "notready" (exit 79), "lost" (the ssh session ends after the end frame,
-// before the ack), "stopped" (vzdump in stop mode), "pve" (the Proxmox version).
+// before the ack), "stopped" (vzdump in stop mode), "pve" (the Proxmox version), "oldhost" (a
+// host release without prev in the header).
 
 type fakeDisk struct {
 	ID   uint8  `json:"id"`
@@ -105,6 +107,11 @@ func imageHost(state string, args []string) int {
 	rand.Read(tok[:])
 	token := hex.EncodeToString(tok[:])
 	h := changes.Header{Token: token, VMID: 100, Mode: mode, PVE: pve}
+	if !has(state, "oldhost") {
+		b, _ := os.ReadFile(filepath.Join(state, "prev"))
+		prev := string(b)
+		h.Prev = &prev
+	}
 	all := true
 	for _, d := range disks {
 		bm := rec.Bitmap[d.Name]
@@ -157,6 +164,12 @@ func imageHost(state string, args []string) int {
 		return 2
 	}
 	logRequest(state, "ack "+string(a.Verb))
+	// as restic-pve request changes: the job is recorded as the guest's last one at the ack
+	os.WriteFile(filepath.Join(state, "prev"), []byte(token), 0o644)
+	if has(state, "failafter") { // vzdump fails after the ack: Proxmox's record stays as it was
+		log("ERROR: Backup of VM 100 failed - could not mark the backup")
+		return 2
+	}
 	// the job succeeded: Proxmox's record counts from this job, for every disk
 	rec = hostRecord{Bitmap: map[string]string{}, Dirty: map[string][]uint64{}}
 	for _, d := range disks {
@@ -300,11 +313,18 @@ func (f *runFix) flag(name string, on bool) {
 	}
 }
 
-func (f *runFix) job(mode string) *Job {
+func (f *runFix) job(mode string) *Job { return f.jobOf(mode, "web") }
+
+// jobOf is the job file of a unit for VM 100 with its own alias (and tags).
+func (f *runFix) jobOf(mode, alias string) *Job {
 	f.seq++
-	j := map[string]any{"schema": 1, "mode": mode, "vmid": 100, "alias": "web", "source": "site1", "ssh_config": "/config/ssh_config",
-		"ssh_host": "pve", "restic_host": "backup", "tags": []string{"source=site1", "instance=web", "unit=guest-web", "kind=guest-image", "vmid=100"},
-		"info": f.info, "view_dir": filepath.Join(f.dir, "view"), "progress_interval_s": 1,
+	view := "view"
+	if alias != "web" {
+		view += "-" + alias
+	}
+	j := map[string]any{"schema": 1, "mode": mode, "vmid": 100, "alias": alias, "source": "site1", "ssh_config": "/config/ssh_config",
+		"ssh_host": "pve", "restic_host": "backup", "tags": []string{"source=site1", "instance=" + alias, "unit=guest-" + alias, "kind=guest-image", "vmid=100"},
+		"info": f.info, "view_dir": filepath.Join(f.dir, view), "progress_interval_s": 1,
 		"deadline": time.Now().Add(time.Hour).Format(time.RFC3339), "full_check_every": 7}
 	p := filepath.Join(f.dir, fmt.Sprintf("job-%d.json", f.seq))
 	writeJSON(p, j)
@@ -316,11 +336,13 @@ func (f *runFix) job(mode string) *Job {
 }
 
 // run runs one stored run and returns its result and the requests the host saw.
-func (f *runFix) run(mode string) (Result, []string) {
+func (f *runFix) run(mode string) (Result, []string) { return f.runOf(mode, "web") }
+
+func (f *runFix) runOf(mode, alias string) (Result, []string) {
 	f.t.Helper()
 	os.Remove(filepath.Join(f.host, "requests"))
 	f.stderr.Reset()
-	res := Run(context.Background(), f.env, f.job(mode))
+	res := Run(context.Background(), f.env, f.jobOf(mode, alias))
 	b, _ := os.ReadFile(filepath.Join(f.host, "requests"))
 	lines := strings.Split(strings.TrimSpace(f.stderr.String()), "\n")
 	var last Result
@@ -368,9 +390,11 @@ func (f *runFix) noPartials() {
 
 // restored dumps snapshot id as a tar and checks that its pieces, in tar order, give every
 // disk image byte for byte, and that its manifest's sha256pt matches.
-func (f *runFix) restored(id string) *pieces.Manifest {
+func (f *runFix) restored(id string) *pieces.Manifest { return f.restoredOf(id, "web") }
+
+func (f *runFix) restoredOf(id, alias string) *pieces.Manifest {
 	f.t.Helper()
-	root := filepath.Join(f.state, "pieces", "web", "vm-100")
+	root := filepath.Join(f.state, "pieces", alias, "vm-100")
 	cmd := f.repo.Cmd("dump", "--archive", "tar", id, root)
 	out, _ := cmd.StdoutPipe()
 	cmd.Start()
@@ -454,6 +478,9 @@ const (
 	lineLayout  = "full read: the last backup is not in the piece layout"
 	lineReady   = "full read: the Proxmox plug-in is not ready (the storage restic-pve is not active); run restic-pve install on the Proxmox host"
 	lineChecks  = "full read: the changed-blocks run did not pass its checks (C1); this run reads the whole disk"
+	lineMoved   = "full read: Proxmox's record of changes moved on since the last backup (a probe, another unit or backup machine for this guest, or an older state folder); the next run reads only changes"
+	lineOldHost = "full read: the Proxmox host does not report which job its record of changes counts from; run restic-pve update on the Proxmox host"
+	lineCleared = "full read: the fault was cleared; this run starts a new record of changes; the next run reads only changes"
 )
 
 func fallbackIs(t *testing.T, res Result, line string, expected bool) {
@@ -628,12 +655,22 @@ func TestRunFullCheck(t *testing.T) {
 	res, _ := f.run(ModeAuto)
 	s0 := f.ok(res, "full")
 	f.change(scsi, 3)
+	before := dirSize(filepath.Join(f.repo.Dir, "data"))
 	res, reqs := f.run(ModeFullCheck)
 	id := f.ok(res, "check")
 	fallbackIs(t, res, lineCheck, true)
 	eq(t, "requests", reqs, []string{"dump 100", "changes 100 use", "ack ok"})
 	if res.Check != "ok" || res.Message != "full check: ok" || res.Fault != nil {
 		t.Fatalf("%+v", res)
+	}
+	// the full read of the check has no parent: every piece goes through restic (the whole
+	// disk is hashed again), which uploads only what the repository lacks: piece 3 (64 KiB of
+	// new data) and the manifest
+	disk := uint64(efiLen + 8*pieces.PieceSize)
+	grown := dirSize(filepath.Join(f.repo.Dir, "data")) - before
+	t.Logf("full check: %d bytes handed to restic, the repository grew by %d bytes", res.StoredBytes, grown)
+	if res.StoredBytes != disk || grown > 256<<10 {
+		t.Fatalf("full check: stored %d, the repository grew by %d", res.StoredBytes, grown)
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	if r := f.record(); r.Base != id || r.RunsSinceCheck != 0 || r.LastCheck == nil || *r.LastCheck != (pieces.Check{Date: today, Result: "ok"}) {
@@ -665,7 +702,7 @@ func TestRunFullCheck(t *testing.T) {
 	res, reqs = f.run(ModeFullCheck)
 	sb := f.ok(res, "check")
 	eq(t, "requests", reqs, []string{"dump 100", "changes 100 use", "ack fail"})
-	if res.Check != "difference" || res.Fault == nil || fmt.Sprint(*res.Fault) != fmt.Sprintf("{%s [%s] 1}", today, scsi) ||
+	if res.Check != "difference" || res.Fault == nil || fmt.Sprint(*res.Fault) != fmt.Sprintf("{%s [%s] 1 }", today, scsi) ||
 		!strings.Contains(res.Message, "--clear-fault web") {
 		t.Fatalf("%+v", res)
 	}
@@ -783,4 +820,156 @@ func TestRunFallbacks(t *testing.T) {
 	f.env.beforeBatch = nil
 	res, _ = f.run(ModeAuto)
 	f.restored(f.ok(res, "full"))
+}
+
+// Two units (aliases) with changed reads for the same VM share Proxmox's one record: a job of
+// one moves it on for the other, which must then read in full and never accept stale pieces.
+// The same holds for a second backup machine or a restored state folder.
+func TestTwoUnitsSameVM(t *testing.T) {
+	f := newRunFix(t, 8)
+	for _, alias := range []string{"web", "web2"} {
+		res, _ := f.runOf(ModeAuto, alias)
+		f.ok(res, "full")
+	}
+	f.change(scsi, 2)
+	res, _ := f.runOf(ModeAuto, "web2")
+	f.restoredOf(f.ok(res, "changes"), "web2")
+	f.change(scsi, 5) // web's base lacks piece 2, Proxmox's record now names only piece 5
+	res, reqs := f.runOf(ModeAuto, "web")
+	id := f.ok(res, "full")
+	fallbackIs(t, res, lineMoved, false)
+	// the first job is cut before its pieces arrive (the host hears the end of the session)
+	eq(t, "requests", reqs, []string{"changes 100 use", "changes 100 new", "ack arm", "dump 100"})
+	f.restoredOf(id, "web")
+	f.change(scsi, 6)
+	res, _ = f.runOf(ModeAuto, "web")
+	f.restoredOf(f.ok(res, "changes"), "web")
+}
+
+// The record that missed a write is never built on again: right after --clear-fault the next
+// run arms and reads in full.
+func TestClearFaultArms(t *testing.T) {
+	f := newRunFix(t, 8)
+	res, _ := f.run(ModeAuto)
+	f.ok(res, "full")
+	f.stale(scsi, 6)
+	f.change(scsi, 2)
+	if res, _ = f.run(ModeFullCheck); res.Check != "difference" {
+		t.Fatalf("%+v", res)
+	}
+	r := f.record()
+	r.ClearFault()
+	r.Save(pieces.RecordFile(f.state, "web"))
+	f.stale(scsi, 4) // the same defect again
+	res, reqs := f.run(ModeAuto)
+	id := f.ok(res, "full")
+	fallbackIs(t, res, lineCleared, true)
+	eq(t, "requests", reqs, []string{"changes 100 new", "ack arm", "dump 100"})
+	f.restored(id)
+}
+
+// A record state file that cannot be used (a field of a newer release, a torn write) is set
+// aside and becomes a fault: a fault it may have held is not lost (requirement 4.3).
+func TestUnreadableRecordKeepsTheFault(t *testing.T) {
+	f := newRunFix(t, 8)
+	res, _ := f.run(ModeAuto)
+	f.ok(res, "full")
+	f.stale(scsi, 6)
+	f.change(scsi, 2)
+	if res, _ = f.run(ModeFullCheck); res.Check != "difference" {
+		t.Fatalf("%+v", res)
+	}
+	p := pieces.RecordFile(f.state, "web")
+	b, _ := os.ReadFile(p)
+	os.WriteFile(p, []byte(strings.Replace(string(b), `"schema":1`, `"schema":1,"x":1`, 1)), 0o600)
+	today := time.Now().UTC().Format("2006-01-02")
+	line := "full read: the record state could not be read on " + today + " and was set aside (web.record.json.bad-*), so a fault of a full check may be lost; run ./backup.sh site1 --clear-fault web after looking at it"
+	for range 2 {
+		f.change(scsi, 3)
+		res, reqs := f.run(ModeAuto)
+		f.restored(f.ok(res, "full"))
+		fallbackIs(t, res, line, false)
+		eq(t, "requests", reqs, []string{"dump 100"})
+	}
+	if bad, _ := filepath.Glob(p + ".bad-*"); len(bad) != 1 {
+		t.Fatalf("set aside: %v", bad)
+	}
+	r := f.record()
+	if r.Fault == nil || r.Fault.Reason != pieces.FaultUnreadable {
+		t.Fatalf("record %+v", r)
+	}
+	r.ClearFault()
+	r.Save(p)
+	res, reqs := f.run(ModeAuto)
+	f.ok(res, "full")
+	fallbackIs(t, res, lineFirst, true)
+	eq(t, "requests", reqs, []string{"changes 100 new", "ack arm", "dump 100"})
+}
+
+// A host release that does not report the guest's last job: every run reads in full and says
+// to update the host.
+func TestOldHostReadsInFull(t *testing.T) {
+	f := newRunFix(t, 8)
+	f.flag("oldhost", true)
+	res, _ := f.run(ModeAuto)
+	f.ok(res, "full")
+	f.change(scsi, 1)
+	res, reqs := f.run(ModeAuto)
+	f.restored(f.ok(res, "full"))
+	fallbackIs(t, res, lineOldHost, false)
+	eq(t, "requests", reqs, []string{"changes 100 use", "changes 100 new", "ack arm", "dump 100"})
+}
+
+// The job fails on the host after the ack: the result names the snapshot the host took, and
+// the next run reads what Proxmox's record still holds (more than the last run, never less).
+func TestFailedAfterTheAck(t *testing.T) {
+	f := newRunFix(t, 8)
+	res, _ := f.run(ModeAuto)
+	f.ok(res, "full")
+	f.change(scsi, 2)
+	f.flag("failafter", true)
+	res, reqs := f.run(ModeAuto)
+	if res.Code != CodeSource || res.Snapshot == nil || res.Kind != "changes" {
+		t.Fatalf("%+v", res)
+	}
+	eq(t, "requests", reqs, []string{"changes 100 use", "ack ok"})
+	f.restored(*res.Snapshot)
+	f.flag("failafter", false)
+	f.change(scsi, 3)
+	res, _ = f.run(ModeAuto)
+	f.restored(f.ok(res, "changes"))
+	if res.ReadBytes != 2*pieces.PieceSize {
+		t.Fatalf("read %d, want pieces 2 and 3", res.ReadBytes)
+	}
+}
+
+// A second run of the same guest on this machine refuses in plain words and touches nothing.
+func TestSecondRunOfAGuestRefuses(t *testing.T) {
+	f := newRunFix(t, 8)
+	unlock, err := lockAlias(f.state, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	for _, run := range []func(context.Context, Env, *Job) Result{Run, Probe} {
+		f.stderr.Reset()
+		res := run(context.Background(), f.env, f.job(ModeAuto))
+		if res.Code != CodeLocalIO || !strings.Contains(res.Message, "another run of web is still going on this backup machine") {
+			t.Fatalf("%+v", res)
+		}
+	}
+	if has(f.host, "requests") {
+		t.Fatal("the host was asked")
+	}
+}
+
+func dirSize(dir string) int64 {
+	var n int64
+	filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			n += fi.Size()
+		}
+		return nil
+	})
+	return n
 }

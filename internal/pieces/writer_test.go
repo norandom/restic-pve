@@ -129,7 +129,7 @@ func TestWriterEqualPieceNeverReachesRestic(t *testing.T) {
 		}
 	}
 	st := w.Stats()
-	if st.ReadBytes != 2*PieceSize+1000 || st.KeptBytes != PieceSize+1000 || st.EqualPieces != 1 || len(st.Kept) != 2 {
+	if st.ReadBytes != 2*PieceSize+1000 || st.KeptBytes != PieceSize+1000 || len(st.Kept) != 2 {
 		t.Fatalf("stats %+v", st)
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
@@ -234,8 +234,8 @@ func TestWriterMTimeClockSetBack(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !w.MTime().Equal(c.want) {
-				t.Fatalf("mtime %v, want %v", w.MTime(), c.want)
+			if !w.mtime.Equal(c.want) {
+				t.Fatalf("mtime %v, want %v", w.mtime, c.want)
 			}
 			if err := w.Put(context.Background(), "drive-scsi0", 0, pieceData(size, 0, 'n')); err != nil {
 				t.Fatal(err)
@@ -353,5 +353,27 @@ func TestBatchSize(t *testing.T) {
 	}
 	if free, err := FreeSpace(t.TempDir()); err != nil || free == 0 {
 		t.Fatalf("free space: %d %v", free, err)
+	}
+}
+
+// A run whose feed failed (Abort) runs no final batch: the host may still wait for the ack,
+// and nothing of the run is to be stored.
+func TestWriterAbortRunsNoFinalBatch(t *testing.T) {
+	dir := t.TempDir()
+	const size = 2 * PieceSize
+	batches := 0
+	w, err := NewWriter(WriterOptions{Root: filepath.Join(dir, "vm-100"), Staging: filepath.Join(dir, ".staging"), Disks: []DiskSize{{"drive-scsi0", size}},
+		BatchBytes: 1 << 30, Batch: func(context.Context, *Batch) error { batches++; return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range uint64(2) {
+		if err := w.Put(context.Background(), "drive-scsi0", i, pieceData(size, i, 'n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Abort(errors.New("the stream broke"))
+	if err := w.Close(context.Background(), []File{{Rel: ManifestName, Data: []byte("{}")}}); err == nil || err.Error() != "the stream broke" || batches != 0 {
+		t.Fatalf("close: %v, %d batches", err, batches)
 	}
 }

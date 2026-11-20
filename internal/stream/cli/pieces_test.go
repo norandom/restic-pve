@@ -44,8 +44,12 @@ func piecesSnapshot(t *testing.T) ([]byte, map[uint8][]byte, []byte) {
 	for _, d := range disks {
 		sizes = append(sizes, pieces.DiskSize{Name: d.name, Size: uint64(len(d.data))})
 	}
+	runs := 0
 	w, err := pieces.NewWriter(pieces.WriterOptions{Root: root, Staging: filepath.Join(dir, "web", ".staging"), Disks: sizes,
-		BatchBytes: pieces.PieceSize, Batch: s.RunBatch}) // a batch per piece: the final snapshot is built over partials
+		BatchBytes: pieces.PieceSize, Batch: func(ctx context.Context, b *pieces.Batch) error { // a batch per piece: the final snapshot is built over partials
+			runs++
+			return s.RunBatch(ctx, b)
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +87,9 @@ func piecesSnapshot(t *testing.T) ([]byte, map[uint8][]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Runs() < 2 {
-		t.Fatalf("%d batches, want several", s.Runs())
+	s.Discard(ctx)
+	if runs < 2 {
+		t.Fatalf("%d batches, want several", runs)
 	}
 	tarb, err := repo.Run("dump", "--archive", "tar", id, root)
 	if err != nil {

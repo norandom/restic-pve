@@ -59,7 +59,8 @@ builds them all. In order:
    after the one connection the socket is unlinked. Calls must come in vzdump's order and name
    the requested guest, type `qemu`.
 5. `probe` and `use` answer `use` for every disk, `new` answers `new`. In `backup_vm` the
-   request writes the header (random 128-bit job token), the config frames and one map per
+   request writes the header (random 128-bit job token, and as `prev` the token in
+   `/run/restic-pve/job-<vmid>`, `""` when there is none), the config frames and one map per
    disk. A map is read from the NBD export only for a disk Proxmox reports `reuse` (`probe`) or
    when every disk is `reuse` (`use`); the socket must be the one qemu-server opens for this
    guest, `/run/qemu-server/<vmid>.backup-access.<pid>/<vmid>-nbd.backup-access`, and every
@@ -71,14 +72,23 @@ builds them all. In order:
    backup machine read nothing of the stream for 10m0s`. A disk that was not in the query, or
    a size that differs, is refused.
 6. After the end frame it waits for one ack line on stdin (`ack <token> ok <snapshot>`, `arm` or
-   `probe`, as the stream contract says). Only the expected one lets `backup_vm` return; `fail`,
+   `probe`, as the stream contract says). The expected one is first recorded: the job's token
+   goes to `/run/restic-pve/job-<vmid>` (0600 root, temp file and rename), since Proxmox's
+   record of changes counts from this job once it succeeds; when that write fails, the job
+   fails. Only then does `backup_vm` return; `fail`,
    another token or verb, a malformed line, the end of stdin, a signal or one hour without an
    ack make it fail, so vzdump reports the guest failed and Proxmox keeps its record. The task
    log gets one line with what really happened (`probe: nothing read or stored`, `armed: change
    record started, nothing stored`, `stored: confirmed by the backup machine as snapshot <id>`).
-7. The socket and its folder are removed, the lock is released. Exit: vzdump's status; 3 for a
+7. The socket is removed, and its folder when it holds no `job-<vmid>` file; the lock is
+   released. Exit: vzdump's status; 3 for a
    broken change record or NBD export; 73 when the space watch stopped vzdump; 1 when vzdump
    ended 0 without a confirmed job.
+
+`/run/restic-pve/job-<vmid>` is on tmpfs on purpose: a reboot also ends every guest's record
+of changes, so Proxmox then reports the disks `new` and the next backup reads in full anyway. A
+guest restarted without a reboot gets a new record too (`new`). A file that is not a token is
+read as none. The request interface is unchanged by it: no new request, argument or setting.
 
 ## Exit codes
 

@@ -110,6 +110,13 @@ func TestReadsPlain(t *testing.T) {
 			t.Errorf("plain lacks %q:\n%s", w, got)
 		}
 	}
+	// a record state that was set aside: a fault that says so
+	r := readsRow("proxmox", "db", facts.GuestReads{Record: &pieces.RecordState{State: "none",
+		Fault: &pieces.Fault{Date: "2026-11-28", Disks: []string{}, Reason: pieces.FaultUnreadable}}}, "./backup.sh <source>")
+	if r.Fault != "FAULT: the record state could not be read on 2026-11-28 and was set aside (a fault may be lost); every run reads in full until you look at it and run ./backup.sh proxmox --clear-fault db" ||
+		r.plain[1] != "fault  db  2026-11-28  0 pieces  record-state-unreadable  do: ./backup.sh proxmox --clear-fault db" {
+		t.Errorf("unreadable: %q %q", r.Fault, r.plain)
+	}
 	// the lines of each kind of run, and before the first full check
 	for _, c := range []struct {
 		run  facts.GuestRun

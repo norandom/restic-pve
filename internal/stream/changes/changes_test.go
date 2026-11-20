@@ -450,3 +450,36 @@ func TestAckLines(t *testing.T) {
 		t.Fatalf("ReadAck consumed past the line: %q left", rest)
 	}
 }
+
+// The header's prev: absent (an older host), empty (no job since the host started) or a token;
+// anything else is refused by the encoder and the decoder.
+func TestHeaderPrev(t *testing.T) {
+	empty := ""
+	for _, prev := range []*string{nil, &empty, func() *string { s := testToken; return &s }()} {
+		h := testHeader(ModeProbe, BitmapNew)
+		h.Prev = prev
+		_, frames, err := decodeAll(t, build(t, h, nil).bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := frames[0].Header.Prev
+		if (got == nil) != (prev == nil) || got != nil && *got != *prev {
+			t.Fatalf("prev %v, want %v", got, prev)
+		}
+	}
+	bad := "NOT-A-TOKEN"
+	h := testHeader(ModeProbe, BitmapNew)
+	h.Prev = &bad
+	if err := NewEncoder(io.Discard).Header(h); err == nil {
+		t.Fatal("the encoder sent a header with a bad prev")
+	}
+	h.Format = Format
+	b, _ := json.Marshal(h)
+	var buf bytes.Buffer
+	fh := rvs.FrameHeader{Type: TypeHeader, Length: uint64(len(b))}.Encode()
+	buf.Write(fh[:])
+	buf.Write(b)
+	if _, err := NewDecoder(&buf).Next(); err == nil {
+		t.Fatal("the decoder took a header with a bad prev")
+	}
+}

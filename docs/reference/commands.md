@@ -196,7 +196,8 @@ words separated by two spaces: `copy <instance> yes|no|unknown <age> ...`, `rest
 `problem`, `verdict safe|not-safe|unknown`. For each guest that reads only changes it adds,
 after the `copy` lines, `reads <alias> changes|full|check|none [ended <time>] [read <size>]
 [skipped <size>] full-check ok|difference <date>|none`, and for a guest whose full check found a
-difference `fault <alias> <date> <n> pieces <disks> do: <command>`. Exit codes: 0 every source and guest is safe, 1 at
+difference `fault <alias> <date> <n> pieces <disks> do: <command>` (`0 pieces
+record-state-unreadable` for a record state that was set aside). Exit codes: 0 every source and guest is safe, 1 at
 least one is not safe or not known, 64 usage, 78 a variable is missing or the config cannot be
 read. The full screen exits with the same code and prints the verdict line when it closes.
 
@@ -259,7 +260,11 @@ changes stream (header, config, one map per disk, end), writes the view file
 `<view_dir>/live` (kind `probe`, see [house-style.md](house-style.md)), sets the guest's record
 state `<RESTIC_PVE_STATE>/pieces/<alias>.record.json` to `none` (written before the ack: Proxmox
 now counts changes from this job, past any earlier base), sends `ack <token> probe`, and ends
-with the result line on stderr:
+with the result line on stderr. A probe moves Proxmox's record on like a backup: what it shows
+changed since the guest's last successful provider job (a backup, an arming or a probe, from
+any unit or backup machine), and the next backup of the guest reads in full once. The sentence
+for the admin: "That is what changed since the last backup or probe of this guest; the next
+backup reads the whole disk once."
 
 ```json
 {"type":"result","status":"ok","code":0,"transient":false,
@@ -293,7 +298,9 @@ environment the command was started with (repository, password file, rclone; `re
 |---|---|
 | `pieces/<alias>/vm-<vmid>` | the tree, the snapshot path of the piece layout; rebuilt from the parent at every run |
 | `pieces/<alias>/.staging` | read pieces before their batch; at most two batches |
-| `pieces/<alias>.record.json` | the record state: what the backup machine knows of Proxmox's change record |
+| `pieces/<alias>.record.json` | the record state: what the backup machine knows of Proxmox's change record (temp file, fsync, rename, then a sync of the folder) |
+| `pieces/<alias>.record.json.bad-<time>` | a record state that could not be used, set aside (see below) |
+| `pieces/<alias>.lock` | held (flock) by the probe or stored run of the guest; a second one refuses |
 | `pieces/<alias>.rvs-manifest.json` | the manifest of a single-stream fall back (written only then) |
 
 The run is chosen from the record state, `info`, and the newest snapshot of the job's tags, and
@@ -301,22 +308,41 @@ once more when Proxmox's header arrives:
 
 | Run | When | Requests | Result `kind` |
 |---|---|---|---|
-| changed blocks | the newest backup is the record's base, a usable pieces snapshot, every disk `reuse`, sizes, disk set and Proxmox version unchanged | `changes <vmid> use`, `ack ok <id>` after acceptance | `changes` |
-| arm and full read | first run, record gone, something changed, the newest backup not in the piece layout, failed checks | `changes <vmid> use` acked `arm`, or `changes <vmid> new` acked `arm`; then `dump <vmid>` | `full` |
+| changed blocks | the newest backup is the record's base, a usable pieces snapshot, every disk `reuse`, sizes, disk set and Proxmox version unchanged, and the header's `prev` is the record state's job | `changes <vmid> use`, `ack ok <id>` after acceptance | `changes` |
+| arm and full read | first run, record gone, something changed, another job moved the record on (`prev`), a host without `prev`, the first run after a cleared fault, the newest backup not in the piece layout, failed checks | `changes <vmid> use` acked `arm`, or `changes <vmid> new` acked `arm`; then `dump <vmid>` | `full` |
 | full read | guest stopped, a fault set, the plug-in not ready (79) | `dump <vmid>` only | `full` |
 | full check | the seventh successful run (`full_check_every`), or mode `full-check` | `dump <vmid>`, then `changes <vmid> use` | `check` |
 | single stream | the state file system has less than 576 MiB free | `dump <vmid>` into `restic backup --stdin` (RVS1, `/<alias>/vm-<vmid>.rvs`) | `full` |
 
 A full read puts the VMA clusters together into 4 MiB pieces (in any order; zero clusters stay
-holes); a piece equal to the parent's stays a placeholder. A full check accepts the full read
-(kind `check`, parent the base), then compares every piece Proxmox's map leaves out with the
-base, disk by disk: all equal, the changed pieces are stored on the full read (`check` `ok`,
-message `full check: ok`); a difference acks `fail`, keeps the full read as the newest backup,
-sets the fault in the record state (the `fault` field of the result) and every later run reads
-in full until `--clear-fault`. Failed checks C1-C3 in a changed-blocks run forget the run's
+holes); a piece equal to the parent's stays a placeholder. At most 256 pieces (1 GiB) may be
+incomplete at a time; beyond that the run stops with exit 7 and says to set `MAX_WORKERS=1` in
+`/etc/restic-pve.conf` on the Proxmox host and to check the guest's fleecing storage. A dump
+that ends with a piece incomplete is exit 3. A full check accepts the full read (kind
+`check`, the base named as `parent`, stored without a parent: every piece goes through restic
+again, which uploads only what the repository lacks, so `stored_bytes` is the whole disk while
+the repository grows by the changes only), then compares every piece Proxmox's map leaves out
+with the base, disk by disk: all equal, the changed pieces are stored on the full read
+(`check` `ok`, message `full check: ok`); a difference acks `fail`, keeps the full read as the
+newest backup, sets the fault in the record state (the `fault` field of the result), drops the
+record (state `none`, no job, no base) and every later run reads in full until
+`--clear-fault`; the first run after it arms. When the header shows that Proxmox's record does
+not count from the base's job, the check compares nothing and says so; the full read is stored. Failed checks C1-C3 in a changed-blocks run forget the run's
 snapshots, ack `fail` and arm and read in full in the same run, without a parent; failing again
 ends the run (exit 3). A failure before the ack (lost ssh among them) stores nothing: the run's
-snapshots are forgotten and Proxmox keeps its record.
+snapshots are forgotten and Proxmox keeps its record. A failure after the ack (vzdump failed
+on the host) keeps the accepted snapshot, which the result's `snapshot` names. SIGINT, SIGTERM
+and SIGHUP end the run as a failure does: the host hears `fail`, the run's snapshots are
+forgotten, the result line is written.
+
+The record state file is read strictly (every field known, its rules). A file that exists but
+cannot be used (a field of a newer release, a torn write, another guest's) is moved to
+`<alias>.record.json.bad-<UTC time>` and replaced, at once, by state `none` with a fault of
+reason `unreadable`: the file may have held a fault, which must survive until the admin clears
+it. Every run then reads in full with the `unreadable` line below until `--clear-fault`; the
+screens read such a file as `none` and change nothing. A second run of the same alias while
+one runs refuses with exit 7 (`another run of <alias> is still going on this backup machine
+...`) and asks nothing of the host.
 
 Each fall back names its reason in `fallback` with exactly one line (also the message of a
 successful run):
@@ -329,10 +355,14 @@ successful run):
 | `check-due` | `full check: reading the whole disk to compare` | true |
 | `disks-changed`, `size-changed`, `pve-changed` | `full read: <what> changed since the last backup; the next run reads only changes` | true |
 | `not-pieces` | `full read: the last backup is not in the piece layout` | true |
+| `fault-cleared` | `full read: the fault was cleared; this run starts a new record of changes; the next run reads only changes` | true |
+| `job-moved` | `full read: Proxmox's record of changes moved on since the last backup (a probe, another unit or backup machine for this guest, or an older state folder); the next run reads only changes` | false |
+| `host-old` | `full read: the Proxmox host does not report which job its record of changes counts from; run restic-pve update on the Proxmox host` | false |
 | `not-ready` | `full read: the Proxmox plug-in is not ready (<reason>); run restic-pve install on the Proxmox host` | false |
 | `checks-failed` | `full read: the changed-blocks run did not pass its checks (<check>); this run reads the whole disk` | false |
 | `no-space` | `full read as a single stream: <state> has <n> free, pieces need <m>` | false |
 | `fault` | `full read: full check found a difference on <date>; run ./backup.sh <source> --clear-fault <alias> after looking at it` | false |
+| `fault` (reason `unreadable`) | `full read: the record state could not be read on <date> and was set aside (<alias>.record.json.bad-*), so a fault of a full check may be lost; run ./backup.sh <source> --clear-fault <alias> after looking at it` | false |
 
 The result line (last stderr line):
 
@@ -350,8 +380,8 @@ differ from the parent), `skipped_bytes` what was not read. `fault` is
 `progress` lines (`bytes_done` counts pieces read or skipped), one `consistency` line (that of
 the stored snapshot's source) and `vzdump` warn and error lines, as `stream backup` writes them.
 Codes: 0 ok, 3 the stream or a check broke a rule (twice for checks), 6 ssh or the Proxmox side
-failed (`transient` as for `stream backup`), 7 restic or local I/O, 64 job file. The single
-stream ends with the stream's own code.
+failed (`transient` as for `stream backup`), 7 restic or local I/O (a second run of the alias
+among them), 64 job file. The single stream ends with the stream's own code.
 
 ## Both roles
 

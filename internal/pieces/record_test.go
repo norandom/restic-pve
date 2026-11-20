@@ -1,10 +1,12 @@
 package pieces
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var (
@@ -43,15 +45,16 @@ func TestRecordTransitions(t *testing.T) {
 	if r.LastCheck.Result != "ok" || r.RunsSinceCheck != 0 {
 		t.Fatalf("check ok: %+v", r)
 	}
+	// a difference: the record that missed a write is dropped, the next run after the clear arms
 	r.CheckDifference("2026-11-28", []string{"drive-scsi0"}, 3)
-	if r.Fault == nil || r.Fault.Pieces != 3 || r.LastCheck.Result != "difference" {
+	if r.Fault == nil || r.Fault.Pieces != 3 || r.LastCheck.Result != "difference" || r.State != RecordNone || r.Job != "" || r.Base != "" || len(r.Disks) != 0 {
 		t.Fatalf("fault: %+v", r)
 	}
 	if err := r.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	got := LoadRecord(path, 100)
-	if got.Fault == nil || got.Base != snapA || got.Disks[0] != disks[0] || got.PVE != "9.2.24" {
+	if got.Fault == nil || got.State != RecordNone || got.PVE != "9.2.24" {
 		t.Fatalf("reload: %+v", got)
 	}
 	got.ClearFault()
@@ -71,62 +74,50 @@ func TestRecordTransitions(t *testing.T) {
 	}
 }
 
-func TestRecordBrokenFileIsNone(t *testing.T) {
+func TestRecordBrokenFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "web.record.json")
 	good := `{"schema":1,"vmid":100,"state":"based","job":"` + job1 + `","base":"` + snapA + `","pve":"9.2.24","disks":[],"runs_since_check":0,"last_check":null,"fault":null}`
 	os.WriteFile(path, []byte(good), 0o600)
-	if r := LoadRecord(path, 100); r.State != RecordBased {
-		t.Fatalf("good file: %+v", r)
+	if r, err := ReadRecord(path, 100); err != nil || r.State != RecordBased {
+		t.Fatalf("good file: %+v %v", r, err)
 	}
 	for _, bad := range []string{"", "{", "null", strings.Replace(good, `"schema":1`, `"schema":2`, 1),
 		strings.Replace(good, `"based"`, `"maybe"`, 1), strings.Replace(good, snapA, "abc", 1),
 		strings.Replace(good, `"vmid":100`, `"vmid":101`, 1), strings.Replace(good, `"fault":null`, `"fault":null,"extra":1`, 1),
-		strings.Replace(good, `"based"`, `"armed"`, 1), strings.Replace(good, job1, "", 1)} {
+		strings.Replace(good, `"based"`, `"armed"`, 1), strings.Replace(good, job1, "", 1), good + "{}", good[:len(good)/2],
+		strings.Replace(good, `"fault":null`, `"fault":{"date":"2026-11-27","disks":[],"pieces":0,"reason":"later"}`, 1)} {
 		os.WriteFile(path, []byte(bad), 0o600)
-		if r := LoadRecord(path, 100); r.State != RecordNone || r.Base != "" {
+		if r, err := ReadRecord(path, 100); !errors.Is(err, ErrRecordFile) {
+			t.Errorf("%q: %+v %v", bad, r, err)
+		}
+		// the screens read it as none and change nothing
+		if r := LoadRecord(path, 100); r.State != RecordNone || r.Base != "" || r.Fault != nil {
 			t.Errorf("%q: %+v", bad, r)
 		}
 	}
+	// a run sets it aside: a fault (it may have held one), saved at once
+	now := time.Date(2026, 11, 27, 5, 4, 3, 0, time.UTC)
+	r, moved, err := SetAside(path, 100, now)
+	if err != nil || moved != path+".bad-20261127T050403Z" || r.Fault == nil || r.Fault.Reason != FaultUnreadable || r.Fault.Date != "2026-11-27" {
+		t.Fatalf("%+v %q %v", r, moved, err)
+	}
+	if got, err := ReadRecord(path, 100); err != nil || got.Fault == nil || got.Fault.Reason != FaultUnreadable || got.State != RecordNone {
+		t.Fatalf("saved: %+v %v", got, err)
+	}
+	if b, _ := os.ReadFile(moved); !strings.Contains(string(b), `"later"`) {
+		t.Fatalf("the bad file was not kept: %q", b)
+	}
 }
 
-// ackWriter checks, at the moment the ack is written, what the state file says.
-type ackWriter struct {
-	t     *testing.T
-	path  string
-	state string
-	got   string
-}
-
-func (w *ackWriter) Write(b []byte) (int, error) {
-	w.state = LoadRecord(w.path, 100).State
-	w.got += string(b)
-	return len(b), nil
-}
-
-func TestCommitWritesTheFileBeforeTheAck(t *testing.T) {
+func TestRecordSaveRefusesAnInvalidState(t *testing.T) {
 	path := RecordFile(t.TempDir(), "web")
-	r := NewRecord(100)
-	r.Arm(job1, "9.2.24", disks)
-	w := &ackWriter{t: t, path: path}
-	if err := Commit(path, r, "ack "+job1+" arm\n", w); err != nil {
-		t.Fatal(err)
-	}
-	if w.state != RecordArmed || w.got != "ack "+job1+" arm\n" {
-		t.Fatalf("state at the ack: %q, ack %q", w.state, w.got)
-	}
-	// a state that cannot be written: no ack
 	bad := NewRecord(100)
-	bad.State = "based" // no base
-	w = &ackWriter{t: t, path: path}
-	if err := Commit(path, bad, "ack x\n", w); err == nil || w.got != "" {
-		t.Fatalf("acked after a failed write: %v %q", err, w.got)
+	bad.State = RecordBased // no base
+	if err := bad.Save(path); err == nil {
+		t.Fatal("an invalid state was written")
 	}
-	os.Chmod(filepath.Dir(path), 0o500)
-	defer os.Chmod(filepath.Dir(path), 0o700)
-	if os.Geteuid() != 0 {
-		if err := Commit(path, r, "ack y\n", w); err == nil || w.got != "" {
-			t.Fatalf("acked although the file could not be written: %v %q", err, w.got)
-		}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file: %v", err)
 	}
 }

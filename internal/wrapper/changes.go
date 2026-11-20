@@ -513,7 +513,8 @@ func (j *job) backupVM(ctx context.Context, vmid uint32, cfgB64 string, fwB64 *s
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	h := changes.Header{Token: j.token, VMID: j.vmid, Mode: j.mode, PVE: j.pve}
+	prev := j.prev()
+	h := changes.Header{Token: j.token, VMID: j.vmid, Mode: j.mode, PVE: j.pve, Prev: &prev}
 	allReuse := true
 	for i, name := range names {
 		v := vols[name]
@@ -577,6 +578,13 @@ func (j *job) backupVM(ctx context.Context, vmid uint32, cfgB64 string, fwB64 *s
 		j.e.infof("no confirmed backup: %v", err)
 		return nil, "", fmt.Errorf("the backup machine did not confirm the backup: %v", err)
 	}
+	// Proxmox's record counts from this job once it succeeds: the next job tells the backup
+	// machine so. Written before backup_vm returns; a job that fails after it leaves a record
+	// that still covers more, never less.
+	if err := j.setPrev(); err != nil {
+		j.e.infof("no confirmed backup: %v", err)
+		return nil, "", fmt.Errorf("the job could not be recorded on this host: %v", err)
+	}
 	j.mu.Lock()
 	j.acked = a.Verb
 	j.mu.Unlock()
@@ -588,6 +596,38 @@ func (j *job) backupVM(ctx context.Context, vmid uint32, cfgB64 string, fwB64 *s
 		changes.VerbOK:    "stored: confirmed by the backup machine as snapshot " + a.Snapshot,
 	}[a.Verb]
 	return nil, fmt.Sprintf("restic-pve: %s (%s)", what, strings.Join(summary, "; ")), nil
+}
+
+// prevPath is the file that holds the token of the guest's last provider job that ended with
+// an ack ok, arm or probe: every such job moves Proxmox's record of changes on. It lives in the
+// job folder on /run (tmpfs): a reboot ends every guest's record too, so Proxmox then reports
+// the disks new anyway.
+func (j *job) prevPath() string {
+	return filepath.Join(j.e.Root, provider.RunDir, fmt.Sprintf("job-%d", j.vmid))
+}
+
+// prev is that token, or "" when there is none (or the file is not one of ours).
+func (j *job) prev() string {
+	b, err := os.ReadFile(j.prevPath())
+	if t := strings.TrimSuffix(string(b), "\n"); err == nil && len(t) == 32 && strings.Trim(t, "0123456789abcdef") == "" {
+		return t
+	}
+	return ""
+}
+
+// setPrev records this job as the guest's last one: temp file and rename in the job folder.
+func (j *job) setPrev() error {
+	p := j.prevPath()
+	tmp := p + ".new"
+	err := os.WriteFile(tmp, []byte(j.token+"\n"), 0o600)
+	if err == nil {
+		err = os.Rename(tmp, p)
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("record the job in %s: %w", p, err)
+	}
+	return nil
 }
 
 // disk sends one disk's map and, in mode use, its changed pieces. It returns the number of

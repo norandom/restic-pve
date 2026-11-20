@@ -66,11 +66,10 @@ type WriterOptions struct {
 
 // WriterStats are the figures of a run so far.
 type WriterStats struct {
-	ReadBytes   uint64  // bytes put
-	KeptBytes   uint64  // bytes of pieces that differ from the parent (handed to restic)
-	EqualPieces int     // pieces put whose digest equals the parent's (left as placeholders)
-	InFlight    uint64  // kept bytes not yet punched (staging and the running batch)
-	Kept        []Piece // every kept piece of the run, in put order
+	ReadBytes uint64  // bytes put
+	KeptBytes uint64  // bytes of pieces that differ from the parent (handed to restic)
+	InFlight  uint64  // kept bytes not yet punched (staging and the running batch)
+	Kept      []Piece // every kept piece of the run, in put order
 }
 
 type pieceKey struct {
@@ -206,9 +205,6 @@ func NewWriter(opt WriterOptions) (*Writer, error) {
 	return w, nil
 }
 
-// MTime is the mtime of every kept piece of this run.
-func (w *Writer) MTime() time.Time { return w.mtime }
-
 // Stats returns the figures so far.
 func (w *Writer) Stats() WriterStats {
 	w.mu.Lock()
@@ -223,6 +219,10 @@ func (w *Writer) signal() {
 	close(w.wake)
 	w.wake = make(chan struct{})
 }
+
+// Abort ends the run for err: Close then runs no final batch, and a batch that waits does not
+// start.
+func (w *Writer) Abort(err error) { w.fail(err) }
 
 func (w *Writer) fail(err error) {
 	w.mu.Lock()
@@ -264,7 +264,6 @@ func (w *Writer) Put(ctx context.Context, dev string, index uint64, data []byte)
 	w.stats.ReadBytes += n
 	if w.tree[rel] && w.digests[dev][index] == digest {
 		// the parent's content: the placeholder stays, restic never sees this piece
-		w.stats.EqualPieces++
 		w.mu.Unlock()
 		return nil
 	}
@@ -438,7 +437,8 @@ func punch(path string, size uint64, mtime time.Time) error {
 
 // Close writes files into the tree, runs the remaining pieces as the final batch and waits
 // for every batch. It refuses to finish when a piece of a disk was neither put nor kept from
-// the parent. The staging folder is removed.
+// the parent, and after Abort or a failed batch it runs no final batch. The staging folder is
+// removed.
 func (w *Writer) Close(ctx context.Context, files []File) error {
 	defer os.RemoveAll(w.opt.Staging)
 	w.mu.Lock()

@@ -440,3 +440,22 @@ func TestDefaultProgramIsResolvedFromPath(t *testing.T) {
 		t.Fatalf("DefaultProgram = %q", DefaultProgram)
 	}
 }
+
+func TestSecretName(t *testing.T) {
+	for k, want := range map[string]bool{
+		"RESTIC_PASSWORD": true, "restic_password": true, "MY_API_KEY": true, "SOME_TOKEN": true, "X_SECRET_Y": true,
+		"RCLONE_CONFIG_PASS": true, "PATH": false, "HOME": false, "SSH_AUTH_SOCK": false, "GOMEMLIMIT": false,
+		"VMASTREAM_VIEW": false, "RESTIC_PVE_STATE": false, "LANG": false, "KEYBOARD": false, "PASSAGE": false,
+	} {
+		if SecretName(k) != want {
+			t.Errorf("%s: %v", k, !want)
+		}
+	}
+}
+
+func TestSafeEnv(t *testing.T) {
+	got := SafeEnv([]string{"PATH=/bin", "RESTIC_PASSWORD=x", "RCLONE_CONFIG_PASS=y", "HOME=/root", "A_KEY=z"})
+	if strings.Join(got, " ") != "PATH=/bin HOME=/root" {
+		t.Fatalf("%q", got)
+	}
+}

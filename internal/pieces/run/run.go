@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/norandom/restic-pve/internal/pieces"
@@ -46,8 +47,9 @@ type runner struct {
 	rec                    *pieces.RecordState
 	recPath, root, staging string
 	batch                  uint64
-	partial                []string       // the tags of this run's batch snapshots
-	parent                 *pieces.Parent // the newest backup when it is a usable pieces parent
+	partial                []string        // the tags of this run's batch snapshots
+	parent                 *pieces.Parent  // the newest backup when it is a usable pieces parent
+	stores                 []*pieces.Store // the accepted snapshots' stores: their partials go at the end
 	started                time.Time
 	res                    Result
 }
@@ -77,6 +79,11 @@ func Run(ctx context.Context, e Env, j *Job) Result {
 	if free == nil {
 		free = pieces.FreeSpace
 	}
+	unlock, err := lockAlias(e.State, j.Alias)
+	if err != nil {
+		return r.fail(err)
+	}
+	defer unlock()
 	err = os.MkdirAll(dir, 0o700)
 	var n uint64
 	if err == nil {
@@ -87,6 +94,9 @@ func Run(ctx context.Context, e Env, j *Job) Result {
 		return r.singleStream(n)
 	}
 	r.v = newView(e, j, r.ev, blockmap.KindChanges)
+	if err == nil {
+		err = r.loadRecord()
+	}
 	if err != nil {
 		return r.fail(err)
 	}
@@ -94,7 +104,6 @@ func Run(ctx context.Context, e Env, j *Job) Result {
 	if e.BatchBytes > 0 {
 		r.batch = e.BatchBytes
 	}
-	r.rec = pieces.LoadRecord(r.recPath, j.VMID)
 	in := Inputs{Job: j, Info: info, Record: r.rec, Root: r.root}
 	if in.Newest, err = r.look(); err != nil {
 		return r.fail(err)
@@ -144,9 +153,53 @@ func (r *runner) want(base string) pieces.ParentWant {
 	return pieces.ParentWant{Root: r.root, Host: r.j.ResticHost, Tags: r.j.Tags, VMID: r.j.VMID, Alias: r.j.Alias, Base: base}
 }
 
+// end writes the result line. The partial snapshots of the accepted snapshots are forgotten
+// first: only now, since restic may wait for a lock and the host must not wait with it.
 func (r *runner) end(code int, transient bool, msg string) Result {
+	if len(r.stores) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		for _, st := range r.stores {
+			st.Discard(ctx) // what stays is the next run's and maintenance's
+		}
+		cancel()
+	}
 	r.res.Code, r.res.Transient, r.res.Message = code, transient, msg
 	return finish(r.e, r.v, r.res)
+}
+
+// lockAlias takes <state>/pieces/<alias>.lock without waiting: one run of a guest at a time
+// on this machine. The returned function releases it.
+func lockAlias(state, alias string) (func(), error) {
+	p := filepath.Join(state, "pieces", alias+".lock")
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
+	if errors.Is(err, os.ErrNotExist) {
+		if err = os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
+			f, err = os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
+		}
+	}
+	if err != nil {
+		return nil, withCode(CodeLocalIO, fmt.Errorf("the lock of %s: %w", alias, err))
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, withCode(CodeLocalIO, fmt.Errorf("another run of %s is still going on this backup machine (it holds %s); nothing was started; run it again when that one has ended", alias, p))
+	}
+	return func() { f.Close() }, nil
+}
+
+// loadRecord reads the record state. A file that cannot be used is set aside and replaced by a
+// fault, saved at once: it may have held one, which must not be lost (requirement 4.3). The
+// run's fall back line says so.
+func (r *runner) loadRecord() error {
+	rec, err := pieces.ReadRecord(r.recPath, r.j.VMID)
+	if errors.Is(err, pieces.ErrRecordFile) {
+		rec, _, err = pieces.SetAside(r.recPath, r.j.VMID, r.e.now())
+	}
+	if err != nil {
+		return withCode(CodeLocalIO, fmt.Errorf("the record state: %w", err))
+	}
+	r.rec = rec
+	return nil
 }
 
 // fail ends the run with the code of err.
@@ -191,144 +244,6 @@ func (r *runner) saveRecord() error {
 	return nil
 }
 
-// --- provider jobs ---
-
-// job is one provider job: ssh ... changes <vmid> <mode>, its stream and its ack.
-type job struct {
-	p    *source.Process
-	in   io.WriteCloser
-	dec  *changes.Decoder
-	h    *changes.Header
-	cfgs []vma.ConfigBlob
-	lost chan int // after the end frame: bytes the host wrote after it, sent when its output ends
-}
-
-// startJob starts a provider job and reads its header.
-func (r *runner) startJob(mode string) (*job, error) {
-	r.ev.skip = mode != changes.ModeProbe // a stored run's consistency is its snapshot source's
-	rd, w, err := source.Open(r.ctx, source.Options{SSHConfig: r.j.SSHConfig, Host: r.j.SSHHost, VMID: r.j.VMID, SSHProgram: r.e.SSHProgram,
-		Request: []string{"changes", strconv.FormatUint(uint64(r.j.VMID), 10), mode}, Ack: true, Env: SafeEnv(os.Environ())}, r.ev)
-	if err != nil {
-		return nil, err
-	}
-	jb := &job{p: w.(*source.Process), dec: changes.NewDecoder(rd)}
-	jb.in = jb.p.Stdin()
-	f, err := jb.dec.Next()
-	if err != nil {
-		return nil, jb.broken(err)
-	}
-	if jb.h = f.Header; jb.h.VMID != r.j.VMID || jb.h.Mode != mode {
-		return nil, jb.stop(withCode(CodeStream, fmt.Errorf("the host answered for VM %d in mode %s", jb.h.VMID, jb.h.Mode)))
-	}
-	return jb, nil
-}
-
-func (jb *job) sendFail(reason string) {
-	if jb.h != nil {
-		if line, err := (changes.Ack{Token: jb.h.Token, Verb: changes.VerbFail, Reason: reason}).Line(); err == nil {
-			io.WriteString(jb.in, line)
-		}
-	}
-	jb.in.Close()
-}
-
-// broken ends a job whose stream broke off or broke a rule: the host hears fail, and its own
-// reason (ssh lost, plug-in not ready, vzdump failed) wins over the cut stream.
-func (jb *job) broken(err error) error {
-	jb.sendFail("the changes stream was not complete")
-	t := time.AfterFunc(10*time.Second, jb.p.Abort)
-	defer t.Stop()
-	if werr := jb.p.Wait(); werr != nil && !strings.Contains(werr.Error(), "source aborted") {
-		return werr
-	}
-	return withCode(CodeStream, fmt.Errorf("changes stream: %w", err))
-}
-
-// stop ends a job this side gives up: the host hears fail, then the session is cut. Proxmox
-// keeps its record.
-func (jb *job) stop(err error) error {
-	reason := []byte(err.Error())
-	for i, c := range reason {
-		if c < 0x20 || c > 0x7e {
-			reason[i] = ' '
-		}
-	}
-	jb.sendFail(string(reason[:min(len(reason), changes.MaxReason)]))
-	if jb.lost == nil { // pieces may still be on their way: cut the session
-		jb.p.Abort()
-	}
-	t := time.AfterFunc(10*time.Second, jb.p.Abort)
-	defer t.Stop()
-	jb.p.Wait()
-	return err
-}
-
-// frames reads the job's frames to the end frame: config frames are kept, maps and pieces go
-// to the callbacks (an error of theirs stops the job).
-func (jb *job) frames(onMap func(changes.Map) error, onPiece func(changes.Piece) error) error {
-	for {
-		f, err := jb.dec.Next()
-		if err != nil {
-			return jb.broken(err)
-		}
-		switch {
-		case f.Config != nil:
-			jb.cfgs = append(jb.cfgs, vma.ConfigBlob{Name: f.Config.Name, Data: bytes.Clone(f.Config.Data)})
-		case f.Map != nil && onMap != nil:
-			err = onMap(*f.Map)
-		case f.Piece != nil:
-			err = onPiece(*f.Piece)
-		case f.End != nil:
-			jb.lost = make(chan int, 1)
-			go func() { // the host keeps its output open until it has the ack
-				var b [1]byte
-				n, _ := jb.p.Read(b[:])
-				jb.lost <- n
-			}()
-			return nil
-		}
-		if err != nil {
-			return jb.stop(err)
-		}
-	}
-}
-
-// ready says whether the host still waits for the ack.
-func (jb *job) ready() error {
-	select {
-	case n := <-jb.lost:
-		jb.lost <- n
-		jb.in.Close()
-		if err := jb.p.Wait(); err != nil {
-			return err
-		}
-		return withCode(CodeSource, errors.New("the Proxmox side ended the job before the ack"))
-	default:
-		return nil
-	}
-}
-
-// commit writes the record state, then sends the ack, and waits for the job's end.
-func (r *runner) commit(jb *job, a changes.Ack) error {
-	line, err := a.Line()
-	if err == nil {
-		err = r.saveRecord()
-	}
-	if err != nil {
-		return jb.stop(err)
-	}
-	io.WriteString(jb.in, line) // a lost session shows in Wait
-	jb.in.Close()
-	n := <-jb.lost
-	if err := jb.p.Wait(); err != nil {
-		return err
-	}
-	if n > 0 {
-		return withCode(CodeStream, errors.New("changes stream: data after the end frame"))
-	}
-	return nil
-}
-
 // noJob is the full read after the host answered exit 79; any other error ends the run.
 func (r *runner) noJob(err error) Result {
 	var se *source.Error
@@ -362,8 +277,11 @@ func (r *runner) changes(in Inputs) Result {
 			err = r.commit(jb, changes.Ack{Token: jb.h.Token, Verb: changes.VerbOK, Snapshot: s.id})
 		}
 	}
+	if jb.acked { // the host took it as the backup, also when the job failed after the ack
+		r.res.Snapshot = &s.id
+	}
 	if err != nil {
-		jb.stop(err) // the host waits for the ack: it hears fail
+		jb.stop(err, false) // a host that waits for the ack hears fail
 	}
 	var ck *pieces.CheckError
 	if errors.As(err, &ck) {
@@ -437,7 +355,7 @@ func (r *runner) armFull(d Decision, jb *job, parent *pieces.Parent) Result {
 	r.v.update(func(s *blockmap.State) { s.Kind, s.Mode, s.Message = blockmap.KindFull, blockmap.KindFull, d.Line })
 	var err error
 	if jb != nil && jb.h.Mode == changes.ModeUse && allReuse(jb.h) { // pieces would follow: it cannot arm
-		jb.stop(errors.New(d.Line))
+		jb.stop(errors.New(d.Line), false)
 		jb = nil
 	}
 	if jb == nil {
@@ -449,7 +367,7 @@ func (r *runner) armFull(d Decision, jb *job, parent *pieces.Parent) Result {
 		return r.noJob(err)
 	}
 	if jb.dec.Expected() != changes.VerbArm {
-		return r.fail(jb.stop(withCode(CodeStream, errors.New("changes stream: the job cannot be acked arm"))))
+		return r.fail(jb.stop(withCode(CodeStream, errors.New("changes stream: the job cannot be acked arm")), false))
 	}
 	disks := []pieces.RecordSize{}
 	for _, dv := range jb.h.Devices {
@@ -496,14 +414,16 @@ func (r *runner) full(d Decision, parent *pieces.Parent) Result {
 	return r.done(s, d.Line)
 }
 
-// check is the full check: a full read on the base S0 is accepted as S_B and becomes the
-// base; then a provider job in mode use: every piece its map leaves out must have the same
-// digest in S0 and S_B, disk by disk. Equal: the changed pieces are stored on S_B ("full
-// check: ok"). Different: the job is acked fail, the fault is set, S_B stays the newest backup.
+// check is the full check: a full read without parent (every piece goes through restic, which
+// stores only what it does not hold; nothing of S0 is taken on trust) is accepted as S_B and
+// becomes the base; then a provider job in mode use: every piece its map leaves out must have
+// the same digest in S0 and S_B, disk by disk. Equal: the changed pieces are stored on S_B
+// ("full check: ok"). Different: the job is acked fail, the fault is set, S_B stays the newest
+// backup.
 func (r *runner) check(d Decision, in Inputs) Result {
 	r.res.Fallback = d.Fallback()
 	s0 := r.parent
-	sb, err := r.fullRead("check", s0, nil)
+	sb, err := r.fullRead("check", nil, nil)
 	if err == nil {
 		if err = r.rec.FullAccepted(sb.id, true); err == nil {
 			err = r.saveRecord()
@@ -522,9 +442,16 @@ func (r *runner) check(d Decision, in Inputs) Result {
 		return r.fail(err)
 	}
 	in.Header, in.Parent, in.ParentID, in.Newest = jb.h, pb.Manifest, pb.ID, &pieces.Snapshot{ID: sb.id, Paths: []string{r.root}}
-	if Decide(in).Run != RunChanges {
-		jb.stop(errors.New("full check: Proxmox has no record to compare"))
-		return r.end(CodeOK, false, "full check: Proxmox has no record of changes to compare (guest restarted, stopped or a disk changed); the full read is stored")
+	if d := Decide(in); d.Run != RunChanges {
+		jb.stop(errors.New("full check: Proxmox has no record to compare"), false)
+		msg := "full check: Proxmox has no record of changes to compare (guest restarted, stopped or a disk changed); the full read is stored"
+		switch d.Reason {
+		case ReasonJobMoved:
+			msg = "full check: not compared: Proxmox's record of changes moved on since the last backup (a probe, another unit or backup machine for this guest, or an older state folder); the full read is stored and the next run starts a new record"
+		case ReasonHostOld:
+			msg = "full check: not compared: the Proxmox host does not report which job its record of changes counts from; the full read is stored; run restic-pve update on the Proxmox host"
+		}
+		return r.end(CodeOK, false, msg)
 	}
 	var diff []string
 	var n uint64
@@ -545,7 +472,7 @@ func (r *runner) check(d Decision, in Inputs) Result {
 	r.res.Kind = "check"
 	today := r.e.now().UTC().Format("2006-01-02")
 	if err != nil {
-		jb.stop(err)
+		jb.stop(err, false)
 	}
 	if errors.Is(err, errDifference) {
 		r.rec.CheckDifference(today, diff, n)
@@ -562,8 +489,11 @@ func (r *runner) check(d Decision, in Inputs) Result {
 			err = r.commit(jb, changes.Ack{Token: jb.h.Token, Verb: changes.VerbOK, Snapshot: s.id})
 		}
 	}
+	if jb.acked {
+		r.res.Snapshot = &s.id
+	}
 	if err != nil {
-		return r.fail(err)
+		return r.fail(jb.stop(err, false))
 	}
 	r.res.Check = "ok"
 	return r.done(s, "full check: ok")
@@ -624,6 +554,9 @@ func (r *runner) store(parent *pieces.Parent, m *pieces.Manifest, devs []vma.Dev
 	if err == nil {
 		files, err = r.manifest(w, m, devs, cfgs)
 	}
+	if err != nil {
+		w.Abort(err) // no final batch: nothing of this run is stored
+	}
 	if cerr := w.Close(r.ctx, files); err == nil {
 		err = cerr
 	}
@@ -640,6 +573,7 @@ func (r *runner) store(parent *pieces.Parent, m *pieces.Manifest, devs []vma.Dev
 		st.Discard(ctx)
 		return nil, err
 	}
+	r.stores = append(r.stores, st)
 	r.v.mu.Lock()
 	for i, c := range r.v.marks { // read in full and equal to the parent: kept
 		if c == blockmap.CellData {
@@ -680,26 +614,31 @@ func (r *runner) manifest(w *pieces.Writer, m *pieces.Manifest, devs []vma.DevIn
 }
 
 // fullRead reads the guest in full with today's dump request and stores it in pieces on
-// parent (nil: every piece is stored). arm is the provider job that started the record, nil
-// for a full read without one.
+// parent (nil: every piece goes to restic). arm is the provider job that started the record,
+// nil for a full read without one. The manifest of a full check names the base it is compared
+// with as its parent, although it is stored without one.
 func (r *runner) fullRead(kind string, parent *pieces.Parent, arm *changes.Header) (*stored, error) {
 	r.ev.skip = false
 	rd, w, err := source.Open(r.ctx, source.Options{SSHConfig: r.j.SSHConfig, Host: r.j.SSHHost, VMID: r.j.VMID, SSHProgram: r.e.SSHProgram,
-		Env: SafeEnv(os.Environ())}, r.ev)
+		Env: source.SafeEnv(os.Environ())}, r.ev)
 	if err != nil {
 		return nil, err
 	}
 	p := w.(*source.Process)
+	var fe *vma.FormatError
 	vr, err := vma.NewReader(bufio.NewReaderSize(rd, 1<<20))
 	if err != nil {
-		return nil, cut(p, err)
+		return nil, cut(p, err, errors.As(err, &fe))
 	}
 	h := vr.Header()
 	r.res.Kind = kind
 	r.v.begin(kind, h.Devices, blockmap.CellUnread)
 	m := &pieces.Manifest{Kind: kind}
-	if parent != nil {
+	switch {
+	case parent != nil:
 		m.Parent = &parent.ID
+	case kind == "check":
+		m.Parent = &r.parent.ID
 	}
 	bitmaps := map[string]string{}
 	if arm != nil {
@@ -726,7 +665,7 @@ func (r *runner) fullRead(kind string, parent *pieces.Parent, arm *changes.Heade
 	}
 	return r.store(parent, m, h.Devices, func(w *pieces.Writer) ([]vma.ConfigBlob, error) {
 		if err := r.readVMA(vr, h, w); err != nil {
-			return nil, cut(p, err)
+			return nil, cut(p, err, errors.As(err, &fe))
 		}
 		if err := p.Wait(); err != nil {
 			return nil, err
@@ -734,23 +673,6 @@ func (r *runner) fullRead(kind string, parent *pieces.Parent, arm *changes.Heade
 		m.Consistency.Value, m.Consistency.Detail = p.Classifier().Consistency()
 		return h.Configs, nil
 	}, nil)
-}
-
-// cut ends a dump the reading side gave up: a stream that broke waits a little for the
-// host's own reason, anything else stops ssh at once.
-func cut(p *source.Process, err error) error {
-	var fe *vma.FormatError
-	if errors.As(err, &fe) {
-		t := time.AfterFunc(10*time.Second, p.Abort)
-		defer t.Stop()
-		if werr := p.Wait(); werr != nil && !strings.Contains(werr.Error(), "source aborted") {
-			return werr
-		}
-		return withCode(CodeStream, err)
-	}
-	p.Abort()
-	p.Wait()
-	return err
 }
 
 // maxOpen bounds the pieces whose clusters are still arriving (1 GiB of RAM).
@@ -777,6 +699,9 @@ func (r *runner) readVMA(vr *vma.Reader, h *vma.Header, w *pieces.Writer) error 
 	for {
 		c, err := vr.Next()
 		if err == io.EOF {
+			if len(open) != 0 {
+				return withCode(CodeStream, fmt.Errorf("the dump ended with %d pieces of 4 MiB not complete", len(open)))
+			}
 			return nil
 		}
 		if err != nil {
@@ -787,7 +712,7 @@ func (r *runner) readVMA(vr *vma.Reader, h *vma.Header, w *pieces.Writer) error 
 		pc := open[k]
 		if pc == nil {
 			if len(open) >= maxOpen {
-				return withCode(CodeLocalIO, fmt.Errorf("more than %d pieces of 4 MiB arrive at the same time", maxOpen))
+				return withCode(CodeLocalIO, fmt.Errorf("the dump sends parts of more than %d pieces of 4 MiB (1 GiB) at the same time, more than this run keeps in memory; set MAX_WORKERS=1 in /etc/restic-pve.conf on the Proxmox host, check that the guest's fleecing storage works, and run the backup again", maxOpen))
 			}
 			n := pieces.PieceLen(d.Size, k.piece)
 			pc = &part{data: make([]byte, n), left: int((n + vma.ClusterSize - 1) / vma.ClusterSize)}

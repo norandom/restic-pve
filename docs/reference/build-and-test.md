@@ -62,8 +62,8 @@ No test needs a Proxmox host or root:
   is never part of a release.
 - The `pieces` tests use the test binary as `ssh` and the Proxmox side behind it: for the
   stored runs a fake host with two disk images, Proxmox's change record of each disk, the
-  changes stream and the ack, and `dump` as a VMA stream; against restic 0.19.1 they take
-  about five minutes.
+  token of the guest's last successful job (`prev`), the changes stream and the ack, and `dump`
+  as a VMA stream; against restic 0.19.1 they take about seven minutes.
 
 ## Tests that need restic or Perl
 

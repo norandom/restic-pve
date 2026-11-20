@@ -260,7 +260,10 @@ its lock behind).
    nanoseconds) as listed. With `--parent` and `--ignore-inode` restic takes every placeholder
    from the parent without opening it. A changed-blocks run builds only on the record's base;
    a full read takes the newest pieces snapshot as its parent when the other rules hold (it
-   reads every piece anyway and compares), and after failed checks it has no parent.
+   reads every piece anyway and compares); after failed checks, and in a full check, it has no
+   parent: every piece then goes through restic, which hashes it again and uploads only what
+   the repository does not hold, so nothing of the base is taken on trust. The manifest of a
+   full check still names the base as its `parent`.
 2. A piece whose SHA-256 equals the parent's stays a placeholder and never reaches restic.
    Every other piece is staged outside the tree (zero 64 KiB clusters as holes) with the run's
    mtime, `max(now, newest parent mtime + 1 s)` in whole seconds, so it differs from its
@@ -275,9 +278,11 @@ its lock behind).
    of the tree reported once. C2: exit 0, no error line, the counts match. C3: `restic diff`
    of the original parent and the final snapshot changes the content only of pieces the run
    kept, adds or removes pieces only on a disk whose size changed, and touches nothing else but
-   the manifest and the config. Then `restic tag --set` with the guest tags, a read of the new
-   snapshot's tree, and the run's partial snapshots are forgotten. A failed check forgets every
-   snapshot of the run.
+   the manifest and the config. Then `restic tag --set` with the guest tags and a read of the new
+   snapshot's tree; the ack follows. The run's partial snapshots are forgotten only when the run
+   ends, after the ack, so the host's job and its fleecing image never wait for a repository
+   lock. A failed check forgets every snapshot of the run. A failure before the final batch
+   (the stream broke, a full check found a difference) runs no final batch.
 
 ## The changes stream
 
@@ -293,7 +298,7 @@ type bytes:
 
 | Type | Header fields | Payload (at most) |
 |---|---|---|
-| `C` header | dev 0, offset 0 | JSON `{"format":"RVC1","token","vmid","mode","pve","devices":[{"id","name","size","bitmap","bitmap_name"}]}` (64 KiB) |
+| `C` header | dev 0, offset 0 | JSON `{"format":"RVC1","token","vmid","mode","pve","prev","devices":[{"id","name","size","bitmap","bitmap_name"}]}` (64 KiB) |
 | `G` config | dev 0, offset 0 | u16le name length, name, data: `qemu-server.conf`, then `qemu-server.fw` when present (a VMA blob, 65535 bytes) |
 | `M` map | dev = device id | state byte: 0 no record, 1 record; for 1 a bitset, 1 bit per piece, bit i in byte i/8, lowest bit first, unused bits 0 |
 | `P` piece | dev = device id, offset = piece start | the piece: 4 MiB, or the rest of the disk |
@@ -301,6 +306,14 @@ type bytes:
 
 - `token` is the job's 128-bit token in 32 lowercase hex; `mode` is `probe`, `use` or `new`;
   `bitmap` is what Proxmox reports per disk: `none`, `new` or `reuse`.
+- `prev` is the token of the guest's last provider job on this host that ended with a success
+  ack (`ok`, `arm` or `probe`), `""` when there was none since the host started. Every such job
+  moves Proxmox's record of changes on, whoever started it: another unit for the same guest, a
+  second backup machine, a probe. The backup machine reads only changes when `prev` is the job
+  its record state names, and otherwise arms and reads in full. A header without `prev` comes
+  from a host release before it; the backup machine then reads in full and says to update the
+  host. A backup machine of v1.3.0 or older refuses a header with `prev` (unknown field, exit
+  3): update the backup machine with the host.
 - Order: the header, the config frames, then for each device in ascending id its map and, in
   mode `use`, each piece its map marks, in ascending offset; then the end frame.
 - Maps: in mode `use` every map has a record when every disk is `reuse`, and none otherwise; in
@@ -326,6 +339,13 @@ ack <token> fail <reason>         the backup machine gave up (printable ASCII, 1
 The host side lets the provider job succeed only on the one success word that fits the stream:
 `probe` for mode `probe`, `ok` for mode `use` with every disk recorded, `arm` otherwise. `fail`,
 another token, another word, a malformed line and the end of stdin before a whole line all make
-the job fail, so Proxmox keeps its record of every change.
+the job fail, so Proxmox keeps its record of every change. A success ack makes the job the
+guest's `prev` before the job ends; a job that then fails still leaves a record that covers at
+least everything since that job.
+
+A probe succeeds like any job: Proxmox's record then counts from the probe. Its numbers are
+what changed since the last successful job of the guest (a backup, an arming or a probe), and
+the next backup reads in full once (the backup machine that probed sets its record state to
+`none`; any other one sees a `prev` it does not know).
 
 [Back to the index](../README.md)

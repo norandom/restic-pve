@@ -29,6 +29,9 @@ const (
 	ReasonPVE        = "pve-changed"
 	ReasonRecordGone = "record-gone"
 	ReasonCheckDue   = "check-due"
+	ReasonCleared    = "fault-cleared" // the first run after --clear-fault
+	ReasonJobMoved   = "job-moved"     // another provider job moved Proxmox's record on
+	ReasonHostOld    = "host-old"      // the host does not say which job the record counts from
 	ReasonChecks     = "checks-failed" // the changed-blocks run failed C1-C3 (Run)
 	ReasonNotReady   = "not-ready"     // the host answered exit 79 (Run)
 	ReasonNoSpace    = "no-space"      // too little working space: the single stream (Run)
@@ -97,10 +100,9 @@ type Inputs struct {
 	Newest *pieces.Snapshot
 	Root   string // the snapshot path of the piece layout
 	// Parent is the manifest of the newest pieces snapshot when it passed LoadParent, and
-	// ParentID its id; ParentErr says why it did not.
-	Parent    *pieces.Manifest
-	ParentID  string
-	ParentErr error
+	// ParentID its id.
+	Parent   *pieces.Manifest
+	ParentID string
 	// Header is the provider job's header once it arrived (the decision is asked again
 	// then); nil before the job.
 	Header *changes.Header
@@ -112,13 +114,17 @@ func full(run, reason, line string, expected bool) Decision {
 
 // Decide chooses the run (design F2). In order: a fault, a stopped guest, no record base, a
 // newest backup that is not a usable pieces parent of the record, a changed disk set, a
-// changed Proxmox version, a changed disk size, a disk without record, a full check due;
-// otherwise a changed-blocks run.
+// changed Proxmox version, a changed disk size, a disk without record, a record that counts
+// from another job than the record state's, a full check due; otherwise a changed-blocks run.
 func Decide(in Inputs) Decision {
 	r := in.Record
+	clear := fmt.Sprintf("run ./backup.sh %s --clear-fault %s after looking at it", in.Job.Source, in.Job.Alias)
+	if f := r.Fault; f != nil && f.Reason == pieces.FaultUnreadable {
+		return full(RunFull, ReasonFault, fmt.Sprintf("full read: the record state could not be read on %s and was set aside (%s.record.json.bad-*), so a fault of a full check may be lost; %s",
+			f.Date, in.Job.Alias, clear), false)
+	}
 	if r.Fault != nil {
-		return full(RunFull, ReasonFault, fmt.Sprintf("full read: full check found a difference on %s; run ./backup.sh %s --clear-fault %s after looking at it",
-			r.Fault.Date, in.Job.Source, in.Job.Alias), false)
+		return full(RunFull, ReasonFault, fmt.Sprintf("full read: full check found a difference on %s; %s", r.Fault.Date, clear), false)
 	}
 	if in.Info.Status != "running" {
 		return full(RunFull, ReasonStopped, "full read: the guest is stopped", true)
@@ -128,12 +134,14 @@ func Decide(in Inputs) Decision {
 	if r.State == pieces.RecordNone && r.Job == "" && len(r.Disks) > 0 && pieceLayout {
 		return gone // a full read without a provider job (stopped guest) started the record over
 	}
+	if r.State == pieces.RecordNone && r.Job == "" && len(r.Disks) == 0 && r.LastCheck != nil && r.LastCheck.Result == "difference" {
+		return full(RunArmFull, ReasonCleared, "full read: the fault was cleared; this run starts a new record of changes"+nextReadsChanges, true)
+	}
 	if r.State != pieces.RecordBased || in.Newest == nil {
 		return full(RunArmFull, ReasonFirstRun, "full read: first run with changed reads"+nextReadsChanges, true)
 	}
 	notPieces := full(RunArmFull, ReasonNotPieces, "full read: the last backup is not in the piece layout", true)
-	if !pieceLayout || in.Newest.ID != r.Base ||
-		in.ParentErr != nil || in.Parent == nil || in.ParentID != r.Base {
+	if !pieceLayout || in.Newest.ID != r.Base || in.Parent == nil || in.ParentID != r.Base {
 		return notPieces
 	}
 	changed := func(reason, what string) Decision {
@@ -170,6 +178,14 @@ func Decide(in Inputs) Decision {
 			if d.Bitmap != "reuse" {
 				return gone
 			}
+		}
+		// Proxmox's record counts from the guest's last successful provider job on the host;
+		// it must be the one the record state names, or the record misses what came before
+		switch {
+		case h.Prev == nil:
+			return full(RunArmFull, ReasonHostOld, "full read: the Proxmox host does not report which job its record of changes counts from; run restic-pve update on the Proxmox host", false)
+		case *h.Prev != r.Job:
+			return full(RunArmFull, ReasonJobMoved, "full read: Proxmox's record of changes moved on since the last backup (a probe, another unit or backup machine for this guest, or an older state folder)"+nextReadsChanges, false)
 		}
 		return Decision{Run: RunChanges, Expected: true}
 	}

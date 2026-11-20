@@ -29,6 +29,7 @@ The file is embedded in the binary (`internal/provider`) and is written only fro
 | `/usr/share/perl5/PVE/Storage/Custom/ResticPVEPlugin.pm` (0644 root) | `install`, yes; rewritten by `host-sync` after an update and by `request changes` before vzdump, both only when it is another release's copy | `install`, no; `uninstall` |
 | storage entry `restic-pve` in `/etc/pve/storage.cfg` (`pvesm add resticpve restic-pve --content backup --nodes <node>`) | `install`, yes | `install`, no; `uninstall` (`pvesm remove restic-pve`, before the file) |
 | `/run/restic-pve/provider.sock` (folder 0700, socket 0600) | `request changes`, for one job | the same request when the job ends; the next request, or a reboot (tmpfs), after a crash; `uninstall` |
+| `/run/restic-pve/job-<vmid>` (0600): the token of the guest's last job that ended with a success ack, sent as `prev` in the next job's header | `request changes`, at the ack | a reboot (tmpfs); `install`, no; `uninstall` |
 
 The file is written with a temp file `.ResticPVEPlugin.pm.new-*` in the same folder, fsync,
 mode and owner, and one rename. Proxmox loads only names matching `^.*\.pm$` from that folder
@@ -123,6 +124,9 @@ method or a call out of order is refused); the guest must be the requested one, 
 the NBD socket must be the one qemu-server opens for the guest; `backup_vm` returns only after
 the backup machine's ack for this job, and `backup_cleanup` refuses a `success` that no ack
 confirmed. Each request line is at most 4 MiB, and the wait for the next call one hour.
+
+The plug-in takes no part in `prev`: the job server writes and reads the file, so the
+plug-in file is the same as before it and `host-sync` does not rewrite it.
 
 ## What Proxmox records for these jobs
 

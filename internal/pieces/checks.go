@@ -2,7 +2,6 @@ package pieces
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -154,24 +153,11 @@ type Store struct {
 	batches  []string // this run's batch snapshots, in order
 	last     *Batch
 	accepted string
-	runs     int
-
-	// ForgetError is set when the partial snapshots of an accepted run could not be forgotten.
-	ForgetError error
-
-	// tests only
-	force      bool
-	skipChecks bool
-	after      func()
 }
 
-// Runs returns how many batches restic ran in this run.
-func (s *Store) Runs() int { return s.runs }
-
-// Batches returns the batch snapshots of this run so far.
-func (s *Store) Batches() []string { return append([]string(nil), s.batches...) }
-
-var errSkipped = errors.New("pieces: checks skipped (test)")
+// batchSeam lets this package's tests change a batch's restic arguments and, with a non-nil
+// result, replace its checks; nil outside them.
+var batchSeam func(s *Store, a *BackupArgs) func() error
 
 // RunBatch is the writer's batch function: restic backup with the partial tags and the
 // previous batch (or the original parent) as parent, then C1 and C2.
@@ -180,19 +166,20 @@ func (s *Store) RunBatch(ctx context.Context, b *Batch) error {
 	if len(s.batches) == 0 && parent == "" {
 		parent = s.Original
 	}
-	s.runs++
-	rep, err := s.R.Backup(ctx, BackupArgs{Root: s.Root, Host: s.Host, Tags: s.PartialTags, Parent: parent, Force: s.force})
+	a := BackupArgs{Root: s.Root, Host: s.Host, Tags: s.PartialTags, Parent: parent}
+	var instead func() error
+	if batchSeam != nil {
+		instead = batchSeam(s, &a)
+	}
+	rep, err := s.R.Backup(ctx, a)
 	if rep != nil && rep.Summary != nil && isHex(rep.Summary.SnapshotID, 64) {
 		s.batches = append(s.batches, rep.Summary.SnapshotID)
 	}
 	if err != nil {
 		return err
 	}
-	if s.skipChecks {
-		if s.after != nil {
-			s.after()
-		}
-		return errSkipped
+	if instead != nil {
+		return instead()
 	}
 	// a restic that failed is named by its exit code and errors (C2) before C1 compares the
 	// files it did or did not report
@@ -212,9 +199,8 @@ func (s *Store) RunBatch(ctx context.Context, b *Batch) error {
 
 // Accept checks the run's final snapshot and makes it the backup: C3 against the original
 // parent (when there is one), `tag --set` with the guest tags, then a read of the new
-// snapshot's tree, which must hold exactly the final batch's files. Then the partial
-// snapshots of the run are forgotten; a failure to forget leaves them to the next run and to
-// maintenance and does not undo the acceptance (ForgetError says so).
+// snapshot's tree, which must hold exactly the final batch's files. The partial snapshots
+// stay until Discard, which the run calls once the host no longer waits for it.
 func (s *Store) Accept(ctx context.Context, kept []Piece, resized map[string]bool) (string, error) {
 	if s.last == nil || !s.last.Final || len(s.batches) == 0 || s.prev != s.batches[len(s.batches)-1] {
 		return "", checkFail("accept", "the run has no checked final batch")
@@ -255,16 +241,14 @@ func (s *Store) Accept(ctx context.Context, kept []Piece, resized map[string]boo
 	if len(files) != s.last.TreeFiles {
 		return "", checkFail("accept", "the new snapshot holds %d files, the run wrote %d", len(files), s.last.TreeFiles)
 	}
-	partials := s.batches[:len(s.batches)-1]
-	s.batches, s.accepted = []string{id}, id
-	if err := s.R.Forget(ctx, partials...); err != nil {
-		s.ForgetError = err
-	}
+	s.accepted = id
 	return id, nil
 }
 
 // Discard forgets every snapshot of this run that is not accepted: the batches and a final
-// snapshot that failed its checks. It is called on every rejection and failure.
+// snapshot that failed its checks. It is called on every rejection and failure, and after an
+// accepted run once the host no longer waits (a failure then leaves the partial snapshots to
+// the next run and to maintenance; it does not undo the acceptance).
 func (s *Store) Discard(ctx context.Context) error {
 	var ids []string
 	for _, id := range s.batches {

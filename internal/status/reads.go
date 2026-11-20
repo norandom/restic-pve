@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/norandom/restic-pve/internal/facts"
+	"github.com/norandom/restic-pve/internal/pieces"
 )
 
 // ReadsRow is one guest that reads only changed blocks: its last run, its last full check
@@ -64,10 +65,13 @@ func readsRow(source, alias string, g facts.GuestReads, hint string) ReadsRow {
 		}
 		if fl := rec.Fault; fl != nil {
 			do := facts.Hint(hint, source) + " --clear-fault " + alias
-			r.Fault = fmt.Sprintf("FAULT: full check found a difference on %s (%d pieces of %s); every run reads in full "+
-				"until you look at it and run %s", fl.Date, fl.Pieces, strings.Join(fl.Disks, ", "), do)
+			what, disks := fmt.Sprintf("full check found a difference on %s (%d pieces of %s)", fl.Date, fl.Pieces, strings.Join(fl.Disks, ", ")), strings.Join(fl.Disks, ",")
+			if fl.Reason == pieces.FaultUnreadable {
+				what, disks = "the record state could not be read on "+fl.Date+" and was set aside (a fault may be lost)", "record-state-unreadable"
+			}
+			r.Fault = fmt.Sprintf("FAULT: %s; every run reads in full until you look at it and run %s", what, do)
 			r.plain = []string{strings.Join(p, "  "), strings.Join([]string{"fault", alias, fl.Date,
-				fmt.Sprintf("%d pieces", fl.Pieces), strings.Join(fl.Disks, ","), "do: " + do}, "  ")}
+				fmt.Sprintf("%d pieces", fl.Pieces), disks, "do: " + do}, "  ")}
 			return r
 		}
 	}

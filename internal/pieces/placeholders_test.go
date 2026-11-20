@@ -279,9 +279,11 @@ func layoutSnapshot(t *testing.T, repo *testfix.Repo, root, host string, tags []
 	m.Config = []Config{{Name: "qemu-server.conf", SHA256: PieceDigest([]byte("x"))}}
 	os.RemoveAll(root)
 	os.MkdirAll(filepath.Join(root, ConfigDir), 0o755)
-	if err := WriteManifestFile(filepath.Join(root, ManifestName), m); err != nil {
+	mb, err := m.Encode()
+	if err != nil {
 		t.Fatal(err)
 	}
+	os.WriteFile(filepath.Join(root, ManifestName), mb, 0o644)
 	os.WriteFile(filepath.Join(root, ConfigPath("qemu-server.conf")), []byte("x"), 0o644)
 	for _, d := range m.Devices { // the test manifest's digests are those of zeros
 		for i := range d.Pieces {

@@ -201,15 +201,3 @@ func TestStreamDropsSecrets(t *testing.T) {
 		t.Errorf("the child lost its ordinary environment: %s", got)
 	}
 }
-
-func TestSecretName(t *testing.T) {
-	for k, want := range map[string]bool{
-		"RESTIC_PASSWORD": true, "restic_password": true, "MY_API_KEY": true, "SOME_TOKEN": true, "X_SECRET_Y": true,
-		"RCLONE_CONFIG_PASS": true, "PATH": false, "HOME": false, "SSH_AUTH_SOCK": false, "GOMEMLIMIT": false,
-		"VMASTREAM_VIEW": false, "RESTIC_PVE_STATE": false, "LANG": false, "KEYBOARD": false, "PASSAGE": false,
-	} {
-		if secretName(k) != want {
-			t.Errorf("%s: %v", k, !want)
-		}
-	}
-}

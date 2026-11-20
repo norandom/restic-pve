@@ -185,7 +185,14 @@ func TestProbeFailures(t *testing.T) {
 	}
 	// the record state cannot be written: the host hears fail, the result is a local error
 	f := newFixture(t, "ok")
-	os.WriteFile(filepath.Join(f.state, "pieces"), nil, 0o644) // a file where the folder goes
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only folder")
+	}
+	dir := filepath.Join(f.state, "pieces")
+	os.MkdirAll(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "web.lock"), nil, 0o600)
+	os.Chmod(dir, 0o500) // the lock can be taken, the record state not written
+	defer os.Chmod(dir, 0o700)
 	res, _ := f.probe()
 	if res.Code != CodeLocalIO {
 		t.Fatalf("%+v", res)

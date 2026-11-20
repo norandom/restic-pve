@@ -361,31 +361,6 @@ func (e *endless) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestWriteManifestFile(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, ManifestName)
-	m := testManifest(t, map[string]uint64{"drive-scsi0": PieceSize})
-	if err := WriteManifestFile(p, m); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if _, err := ReadManifest(f); err != nil {
-		t.Fatal(err)
-	}
-	m.Kind = "bogus"
-	if err := WriteManifestFile(p, m); !errors.Is(err, ErrManifest) {
-		t.Fatalf("invalid manifest written: %v", err)
-	}
-	ents, _ := os.ReadDir(dir)
-	if len(ents) != 1 {
-		t.Fatalf("left behind: %v", ents)
-	}
-}
-
 // TestFilesEqualResticTarOrder stores a tree of the layout with the pinned restic and checks
 // that `restic dump --archive tar` returns its files in exactly the order of Files.
 func TestFilesEqualResticTarOrder(t *testing.T) {

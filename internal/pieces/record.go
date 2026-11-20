@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Record states of a guest, as the backup machine knows Proxmox's change record.
@@ -23,10 +23,10 @@ func RecordFile(state, alias string) string {
 }
 
 // RecordState is /state/pieces/<alias>.record.json: what the backup machine knows about the
-// change record of one guest. It is written with temp file and rename, always before the ack
-// line goes to the host (Commit): if the ack never arrives, Proxmox did not advance the
-// record, which then still covers everything since an older job; the state file at worst
-// names a newer base than the host advanced to, and the next run's checks catch that.
+// change record of one guest. It is written with temp file, fsync and rename, always before the
+// ack line goes to the host: if the ack never arrives, Proxmox did not advance the record,
+// which then still covers everything since an older job; the state file at worst names a newer
+// base than the host advanced to, and the host's last job (the header's prev) shows that.
 type RecordState struct {
 	Schema         int          `json:"schema"`
 	VMID           uint32       `json:"vmid"`
@@ -57,8 +57,13 @@ type Check struct {
 type Fault struct {
 	Date   string   `json:"date"`
 	Disks  []string `json:"disks"`
-	Pieces uint64   `json:"pieces"` // pieces that differ
+	Pieces uint64   `json:"pieces"`           // pieces that differ
+	Reason string   `json:"reason,omitempty"` // "": a full check found it; FaultUnreadable
 }
+
+// FaultUnreadable is the fault of a record state file that existed but could not be used: it
+// may have held a fault, which must not be lost (requirement 4.3).
+const FaultUnreadable = "unreadable"
 
 // ErrRecord: a transition that the state does not allow.
 var ErrRecord = errors.New("pieces: record state")
@@ -92,31 +97,67 @@ func (r *RecordState) valid(vmid uint32) bool {
 			return false
 		}
 	}
+	if r.Fault != nil && r.Fault.Reason != "" && r.Fault.Reason != FaultUnreadable {
+		return false
+	}
 	return printable(r.PVE, 64) || r.PVE == ""
 }
 
-// LoadRecord reads the state file of guest vmid. A missing, unreadable or broken file, or one
-// of another guest, means "none": the next run reads in full.
-func LoadRecord(path string, vmid uint32) *RecordState {
-	f, err := os.Open(path)
-	if err != nil {
-		return NewRecord(vmid)
+// ErrRecordFile: a record state file exists but cannot be used (unreadable, torn, a field this
+// release does not know, out of its rules, or another guest's).
+var ErrRecordFile = errors.New("pieces: the record state file cannot be used")
+
+// ReadRecord reads the state file of guest vmid. A missing file is "none" (no record yet); a
+// file that exists but cannot be used is an error wrapping ErrRecordFile.
+func ReadRecord(path string, vmid uint32) (*RecordState, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return NewRecord(vmid), nil
 	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
-	if err != nil || len(b) > 1<<20 {
-		return NewRecord(vmid)
+	if err == nil && len(b) > 1<<20 {
+		err = errors.New("larger than 1 MiB")
 	}
 	var r RecordState
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil || !r.valid(vmid) {
-		return NewRecord(vmid)
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		if err = dec.Decode(&r); err == nil && dec.More() {
+			err = errors.New("data after the state")
+		}
+	}
+	if err == nil && !r.valid(vmid) {
+		err = fmt.Errorf("not a valid state of VM %d", vmid)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrRecordFile, path, err)
 	}
 	if r.Disks == nil {
 		r.Disks = []RecordSize{}
 	}
-	return &r
+	return &r, nil
+}
+
+// LoadRecord is ReadRecord for the screens, which never change a file: a file that cannot be
+// used reads as "none" (the next run sets it aside, see SetAside).
+func LoadRecord(path string, vmid uint32) *RecordState {
+	r, err := ReadRecord(path, vmid)
+	if err != nil {
+		return NewRecord(vmid)
+	}
+	return r
+}
+
+// SetAside moves a state file that cannot be used to <path>.bad-<UTC time> and returns the
+// state that replaces it: none, with a fault of reason FaultUnreadable (the file may have
+// held a fault), saved before anything else happens. The admin clears it as any fault.
+func SetAside(path string, vmid uint32, now time.Time) (*RecordState, string, error) {
+	bad := path + ".bad-" + now.UTC().Format("20060102T150405Z")
+	if err := os.Rename(path, bad); err != nil {
+		return nil, "", fmt.Errorf("set the record state aside: %w", err)
+	}
+	r := NewRecord(vmid)
+	r.Fault = &Fault{Date: now.UTC().Format("2006-01-02"), Disks: []string{}, Reason: FaultUnreadable}
+	return r, bad, r.Save(path)
 }
 
 // Save writes the state with a temp file in the same folder, fsync and rename.
@@ -151,17 +192,11 @@ func (r *RecordState) Save(path string) error {
 		os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	return nil
-}
-
-// Commit writes the state, then the ack line to w (the host's stdin). Nothing is sent when
-// the state cannot be written.
-func Commit(path string, r *RecordState, ackLine string, w io.Writer) error {
-	if err := r.Save(path); err != nil {
-		return err
+	if d, err := os.Open(dir); err == nil { // the rename itself survives a crash
+		d.Sync()
+		d.Close()
 	}
-	_, err := io.WriteString(w, ackLine)
-	return err
+	return nil
 }
 
 // Arm: a provider job with "new" (or with a disk without a record) was acked "arm". The record
@@ -209,10 +244,12 @@ func (r *RecordState) CheckOK(date string) {
 	r.RunsSinceCheck = 0
 }
 
-// CheckDifference: a full check found pieces that differ; the fault stays until cleared.
+// CheckDifference: a full check found pieces that differ; the fault stays until cleared. The
+// record that missed a write is never built on again: the first run after the clear arms.
 func (r *RecordState) CheckDifference(date string, disks []string, pieces uint64) {
 	r.LastCheck = &Check{Date: date, Result: "difference"}
 	r.Fault = &Fault{Date: date, Disks: append([]string{}, disks...), Pieces: pieces}
+	r.State, r.Job, r.Base, r.Disks = RecordNone, "", "", []RecordSize{}
 	r.RunsSinceCheck = 0
 }
 

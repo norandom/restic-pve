@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -17,6 +19,7 @@ import (
 	"github.com/norandom/restic-pve/internal/pieces"
 	prun "github.com/norandom/restic-pve/internal/pieces/run"
 	"github.com/norandom/restic-pve/internal/role"
+	"github.com/norandom/restic-pve/internal/stream/source"
 	"github.com/norandom/restic-pve/internal/watch"
 )
 
@@ -52,7 +55,7 @@ func cmdPieces(args []string, e env) int {
 	// restic gets the environment backupctl passes; ssh and the stream never see a secret of it
 	resticEnv := os.Environ()
 	for _, kv := range os.Environ() {
-		if k, _, _ := strings.Cut(kv, "="); secretName(k) {
+		if k, _, _ := strings.Cut(kv, "="); source.SecretName(k) {
 			os.Unsetenv(k)
 		}
 	}
@@ -66,24 +69,30 @@ func cmdPieces(args []string, e env) int {
 	if j.Mode == prun.ModeProbe {
 		runJob, what = prun.Probe, "probe"
 	}
+	// a signal ends the run as a failure does: the host hears fail, the run's partial
+	// snapshots are forgotten, the result line is written
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
 	var screen tcell.Screen
 	if !e.plain(false) {
 		screen, err = e.newScreen()
 	}
 	if screen == nil || err != nil {
-		res := runJob(context.Background(), re, j)
+		res := runJob(ctx, re, j)
 		fmt.Fprintln(e.stdout, res.Message)
 		return res.Code
 	}
 	var held lockedBuffer
 	re.Stderr = &held
 	done := make(chan prun.Result, 1)
-	go func() { done <- runJob(context.Background(), re, j) }()
-	stop := restoreOnSignal(screen)
+	go func() { done <- runJob(ctx, re, j) }()
+	go func() { // leave the view on a signal; the run ends by itself
+		<-ctx.Done()
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
+	}()
 	verr := watch.Run(screen, watch.Options{Dir: j.ViewDir, Color: e.getenv("NO_COLOR") == "", Follow: true,
 		Words: watch.Words{Title: title(what), Start: "restic-pve pieces --job " + *jobFile}})
 	screen.Fini()
-	stop()
 	var res prun.Result
 	select {
 	case res = <-done:

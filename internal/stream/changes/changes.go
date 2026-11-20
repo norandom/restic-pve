@@ -72,11 +72,15 @@ const (
 
 // Header is the first frame.
 type Header struct {
-	Format  string   `json:"format"`
-	Token   string   `json:"token"` // 128-bit job token, 32 lowercase hex
-	VMID    uint32   `json:"vmid"`
-	Mode    string   `json:"mode"`
-	PVE     string   `json:"pve"`
+	Format string `json:"format"`
+	Token  string `json:"token"` // 128-bit job token, 32 lowercase hex
+	VMID   uint32 `json:"vmid"`
+	Mode   string `json:"mode"`
+	PVE    string `json:"pve"`
+	// Prev is the token of the guest's last provider job that ended with an ack ok, arm or
+	// probe on this host since its last reboot ("" when there is none): Proxmox's record
+	// counts from that job. nil: a host release that does not report it.
+	Prev    *string  `json:"prev,omitempty"`
 	Devices []Device `json:"devices"` // ascending id
 }
 
@@ -198,6 +202,9 @@ func validHeader(h *Header) error {
 	}
 	if h.VMID < 100 || h.VMID > 999999999 {
 		return fmt.Errorf("vmid %d", h.VMID)
+	}
+	if h.Prev != nil && *h.Prev != "" && !isHex(*h.Prev, 32) {
+		return fmt.Errorf("prev %q is not empty or 32 lowercase hex characters", *h.Prev)
 	}
 	switch h.Mode {
 	case ModeProbe, ModeUse, ModeNew:
