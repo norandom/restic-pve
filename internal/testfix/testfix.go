@@ -240,6 +240,10 @@ func (r *Repo) Run(args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// Env returns a copy of the environment the repository's restic runs with (repository,
+// made-up password, cache), as backupctl would pass it.
+func (r *Repo) Env() []string { return append([]string(nil), r.env...) }
+
 // Cmd returns an unstarted restic command against the repository, for streaming output.
 func (r *Repo) Cmd(args ...string) *exec.Cmd {
 	cmd := exec.Command(r.Bin, args...)

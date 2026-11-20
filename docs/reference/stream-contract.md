@@ -215,6 +215,38 @@ read piece the digest of its bytes. A manifest is refused (exit 8) when a field 
 out of its rule, when anything follows the object, when it is truncated, and when a digest list
 does not give its `sha256pt`; one changed byte in any piece changes `sha256pt`.
 
+### How a run stores the layout
+
+Built, not yet used by a command (the code is `internal/pieces`: `placeholders.go`,
+`writer.go`, `restic.go`, `checks.go`). restic always runs as
+`nice -n 19 ionice -c 3 restic --retry-lock 30m --json ...` with the environment the control
+code passes, and its output is always read to the end (a restic stopped by a closed pipe leaves
+its lock behind).
+
+1. The parent is usable only when it is the record's base, its paths are exactly the tree root,
+   its host and tags are the unit's, and its `_manifest.json` is valid, of this guest, and lists
+   exactly the files of `restic ls` (each piece at its size). The tree is deleted and rebuilt
+   from `restic ls --json --recursive`: one sparse file per piece, size and mtime (with
+   nanoseconds) as listed. With `--parent` and `--ignore-inode` restic takes every placeholder
+   from the parent without opening it.
+2. A piece whose SHA-256 equals the parent's stays a placeholder and never reaches restic.
+   Every other piece is staged outside the tree with the run's mtime,
+   `max(now, newest parent mtime + 1 s)` in whole seconds, so it differs from its placeholder
+   even when the clock was set back.
+3. Kept pieces go into the tree in batches of `min(1 GiB, free / 4)` (at least 576 MiB free on
+   the state file system). Each batch is `restic backup -v --host <h> --tag
+   kind=guest-pieces-partial,<unit>,<vmid> --ignore-inode --parent <previous> <root>`; a run
+   without a parent passes `--force` instead, so restic never picks a parent itself. After a
+   batch passed C1 and C2 its pieces are punched back into placeholders. While restic runs, at
+   most two batches wait in staging; then the stream is not read until a batch ends.
+4. C1: every piece of the batch is `new` or `modified`, every other piece `unchanged`, each file
+   of the tree reported once. C2: exit 0, no error line, the counts match. C3: `restic diff`
+   of the original parent and the final snapshot changes the content only of pieces the run
+   kept, adds or removes pieces only on a disk whose size changed, and touches nothing else but
+   the manifest and the config. Then `restic tag --set` with the guest tags, a read of the new
+   snapshot's tree, and the run's partial snapshots are forgotten. A failed check forgets every
+   snapshot of the run.
+
 ## The changes stream
 
 Built, not yet used by any command: `restic-pve request changes` will write it on stdout for one
