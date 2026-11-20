@@ -14,22 +14,11 @@ import (
 // dump runs `vzdump --stdout` under the host-wide lock and the free-space guard of the
 // fleecing storage. It returns vzdump's exit status, or 73 when the guard stopped it.
 func (e *Env) dump(vmid string, c Conf) (int, error) {
-	lock, err := os.OpenFile(e.LockFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	lock, err := e.lock(c)
 	if err != nil {
-		return 0, fmt.Errorf("open lock file: %w", err)
+		return 0, err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return 0, fail(exBusy, "busy: another dump is running on this host")
-	}
-	avail, ok := e.availKiB(c.Storage)
-	if !ok {
-		return 0, fail(exNoSpace, "fleecing storage %s: free space unknown (storage inactive?); dump not started", c.Storage)
-	}
-	if avail < c.minGiB()*1048576 {
-		return 0, fail(exNoSpace, "fleecing storage %s has %d GiB free, below FLEECING_MIN_FREE_GIB=%s; dump not started",
-			c.Storage, avail/1048576, c.MinFreeGiB)
-	}
 	cmd := e.command(context.Background(), "nice", "-n", "19", "vzdump", vmid, "--mode", "snapshot", "--stdout",
 		"--compress", "0", "--bwlimit", c.BwlimitKiB, "--ionice", "7", "--performance", "max-workers="+c.MaxWorkers,
 		"--fleecing", "enabled=1,storage="+c.Storage)

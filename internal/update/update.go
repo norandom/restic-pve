@@ -43,6 +43,10 @@ type Config struct {
 	HTTPClient     *http.Client
 	IsRoot         func() bool
 	Stdout, Stderr io.Writer
+	// HostSync: after the rename, run "<Target> host-sync", so the new binary brings the
+	// Proxmox plug-in to its own embedded copy (it waits for a running backup). Its failure
+	// does not fail the update: the next backup syncs the plug-in under the lock.
+	HostSync bool
 }
 
 // BaseURL returns the latest-release download URL of a GitHub repository ("owner/name").
@@ -83,22 +87,59 @@ func Run(c Config) int {
 		fmt.Fprintln(c.Stderr, "restic-pve: update must run as root")
 		return 1
 	}
-	msg, err := c.update()
+	msg, replaced, err := c.update()
 	if err != nil {
 		fmt.Fprintf(c.Stderr, "restic-pve: update failed: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(c.Stdout, msg)
+	if replaced && c.HostSync {
+		c.hostSync()
+	}
 	return 0
 }
 
-func (c Config) update() (string, error) {
+// hostSync runs the new binary's host-sync step and passes its lines on.
+func (c Config) hostSync() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.Target, "host-sync")
+	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if len(out) > 4096 {
+		out = out[:4096]
+	}
+	c.Stdout.Write(out)
+	if err != nil {
+		fmt.Fprintf(c.Stderr, "restic-pve: plug-in sync after the update did not finish (%v); the next backup brings the plug-in up to date\n", err)
+	}
+}
+
+func (c Config) update() (string, bool, error) {
+	msg, err := c.check()
+	if err != nil || msg != "" {
+		return msg, false, err
+	}
+	return c.install()
+}
+
+// check returns a message when there is nothing to install.
+func (c Config) check() (string, error) {
 	if len(c.Keys) == 0 {
 		return "", errors.New("no release keys in this build; install a release built with a signing key")
 	}
 	if c.Arch != "amd64" && c.Arch != "arm64" {
 		return "", fmt.Errorf("no release binary for architecture %q (amd64 and arm64 only)", c.Arch)
 	}
+	return "", nil
+}
+
+func (c Config) install() (string, bool, error) {
+	msg, err := c.fetchAndReplace()
+	return msg, err == nil && strings.HasPrefix(msg, "restic-pve updated"), err
+}
+
+func (c Config) fetchAndReplace() (string, error) {
 	asset := "restic-pve-linux-" + c.Arch
 	sums, err := c.fetch("SHA256SUMS", smallLimit)
 	if err != nil {

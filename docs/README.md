@@ -32,8 +32,9 @@ project overview, its limits and the two-minute demo are in the [README](../READ
 ## For developers (reference)
 
 - [reference/commands.md](reference/commands.md): every subcommand per role, its flags, the
-  variables it reads and its exit codes, including the install, uninstall and update details.
-- [reference/request-interface.md](reference/request-interface.md): `request ping|info|dump`
+  variables it reads and its exit codes, including the install, uninstall and update details,
+  and `pieces --job FILE` with the probe.
+- [reference/request-interface.md](reference/request-interface.md): `request ping|info|dump|changes`
   between the machines, the settings file grammar, the SSH and sudo entries, exit codes.
 - [reference/stream-contract.md](reference/stream-contract.md): `stream backup|verify|to-vma|to-raw`,
   flags, stdout and stderr, the result line, exit codes 0 and 2 to 10, the vzdump log table, and
@@ -41,7 +42,8 @@ project overview, its limits and the two-minute demo are in the [README](../READ
 - [reference/why-cache.md](reference/why-cache.md): why the stream keeps blocks in memory during a
   guest backup, how much, and what happens when that is not enough.
 - [reference/provider-plugin.md](reference/provider-plugin.md): the Proxmox plug-in for
-  changed-block reads, its calls and its tests (built, not yet written to a host).
+  changed-block reads: what install adds and uninstall removes, the calls, the job server, the
+  sync with the binary, and the tests.
 - [reference/release-assets.md](reference/release-assets.md): the four files of a release and the
   `relsign` commands.
 - [reference/build-and-test.md](reference/build-and-test.md): the pinned Go image, vendoring, the

@@ -1,15 +1,19 @@
 package install
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/norandom/restic-pve/internal/provider"
 )
 
-// Uninstall returns the host to clean: update timer and service, sudoers entry, settings,
-// old wrapper files, lock, the backup user with its home, and last the binary. The sudo
-// package stays.
+// Uninstall returns the host to clean: first the storage entry restic-pve, the plug-in file
+// and the job folder /run/restic-pve/ of changed reads, then update timer and service,
+// sudoers entry, settings, old wrapper files, lock, the backup user with its home, and last
+// the binary. The sudo package stays.
 // Exit codes: 0 done, 1 not root or a step failed, 75 a dump holds the lock.
 func (s *System) Uninstall() int {
 	if !s.IsRoot() {
@@ -23,6 +27,15 @@ func (s *System) Uninstall() int {
 			fmt.Fprintln(s.Stderr, "restic-pve: uninstall refused: a dump is running (lock held); nothing changed")
 			return 75
 		}
+	}
+	// changed reads first; when they cannot be removed completely, the rest goes on, the binary
+	// stays so the same command can finish, and the end says what is left
+	var left *provider.LeftError
+	if err := s.provider().Disable(); errors.As(err, &left) {
+		fmt.Fprintf(s.Stderr, "restic-pve: %v\n", err)
+	} else if err != nil {
+		fmt.Fprintf(s.Stderr, "restic-pve: uninstall failed: %v\n", err)
+		return 1
 	}
 	if err := s.removeTimer(); err != nil {
 		fmt.Fprintf(s.Stderr, "restic-pve: uninstall failed: %v\n", err)
@@ -48,6 +61,12 @@ func (s *System) Uninstall() int {
 		} else {
 			s.report("removed", "user "+user+" and its home")
 		}
+	}
+	if left != nil {
+		s.report("kept", Binary+" (to finish the uninstall)")
+		fmt.Fprintf(s.Stderr, "restic-pve: uninstall not complete: left on this host: %s. To finish: %s, then restic-pve uninstall\n",
+			left.Left, left.Finish)
+		return 1
 	}
 	if err := s.removeReport(Binary); err != nil {
 		fmt.Fprintf(s.Stderr, "restic-pve: uninstall failed: %v\n", err)

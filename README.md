@@ -32,7 +32,8 @@ It is not for you (yet) if:
 - you need arm64, or a storage other than Google Drive with a guided setup (Google Drive is the
   only tested storage);
 - you need changed-block reads: every guest backup reads the whole disk, and restic
-  deduplicates what did not change;
+  deduplicates what did not change (the Proxmox side of changed reads is built and can be turned
+  on, for single hosts only, not for cluster nodes; the backup machine does not use it yet);
 - one backup machine has to serve several Proxmox hosts.
 
 It does not replace or touch an existing vzdump job or Proxmox Backup Server. On the host it adds

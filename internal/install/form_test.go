@@ -298,7 +298,7 @@ func TestFormFreshInstall(t *testing.T) {
 	h, term := formHost(t)
 	// the paste ends with Enter; the space after it in the same paste is dropped
 	code := h.form("192.0.2.10", enterKey, pasteA+key+" restic-backup@backup.example\r "+pasteZ,
-		" ", "j", " ", enterKey, enterKey, enterKey, enterKey)
+		" ", "j", " ", enterKey, enterKey, enterKey, enterKey, enterKey)
 	through(t, "fresh", code, h)
 	if term.started != 1 || term.stopped != 1 {
 		t.Fatalf("terminal started %d stopped %d", term.started, term.stopped)
@@ -322,39 +322,45 @@ func TestFormFreshInstall(t *testing.T) {
 // The visible texts of every screen, once, and the retro look: frame, bars, boxes, colours.
 func TestFormScreens(t *testing.T) {
 	h, _ := formHost(t)
-	through(t, "screens", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, down, enterKey, enterKey, enterKey), h)
+	through(t, "screens", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, down, enterKey, enterKey, enterKey, enterKey), h)
 	cases := []struct {
 		title, box string
 		main, help []string
 		keys       string
 	}{
-		{"restic-pve install · step 1 of 5: Backup machine address", "─ Backup machine address ─", []string{
+		{"restic-pve install · step 1 of 6: Backup machine address", "─ Backup machine address ─", []string{
 			"Type the IP address of the backup machine", "Only this address may log in with the backup key.",
 			"Run ./setup.sh --proxmox on the backup machine; it prints this address.", "> 192.0.2.10"},
 			[]string{"Example: 192.0.2.10"}, "Enter continue · Esc back · Ctrl-U clear"},
-		{"restic-pve install · step 2 of 5: Public key", "─ Public key ─", []string{
+		{"restic-pve install · step 2 of 6: Public key", "─ Public key ─", []string{
 			"Paste the whole public key line of the backup machine. It starts with ssh-ed25519",
 			"A public key is not a secret.", "> ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."},
 			[]string{"Example: ssh-ed25519 AAAA..."}, "Enter continue · Esc back · Ctrl-U clear"},
-		{"restic-pve install · step 3 of 5: Guests", "─ Guests ─", []string{
+		{"restic-pve install · step 3 of 6: Guests", "─ Guests ─", []string{
 			"Tick the virtual machines to back up.", "NUMBER NAME STATUS",
 			"► [ ] 100 web running", "[ ] 102 scratch stopped"},
 			[]string{"0 ticked"}, "Up/Down move · Space tick · Enter continue · Esc back"},
-		{"restic-pve install · step 4 of 5: Fleecing storage", "─ Fleecing storage ─", []string{
+		{"restic-pve install · step 4 of 6: Fleecing storage", "─ Fleecing storage ─", []string{
 			"temporary data while a running guest is read, so the guest", "most free space on fast disks",
 			"NAME TYPE FREE GiB", "► (*) fast-ssd lvmthin 819", "( ) local dir 77"},
 			[]string{"fast-ssd: lvmthin, 819 GiB free"}, "Up/Down move · Enter choose · Esc back"},
-		{"restic-pve install · step 5 of 5: Limits", "─ Limits ─", []string{
+		{"restic-pve install · step 5 of 6: Limits", "─ Limits ─", []string{
 			"These limits protect this host while a backup runs.",
 			"Start a backup only with 32 GiB", "Stop a running backup below 8 GiB",
 			"Read limit 40 MiB/s", "Backups at the same time 1",
 			"► Keep these (recommended)", "Change"},
 			[]string{"Keep: the values above stay."}, "Up/Down move · Enter choose · Esc back"},
+		{"restic-pve install · step 6 of 6: Changed reads", "─ Changed reads ─", []string{
+			"Optional. Yes adds two things to this host: the file /usr/share/perl5/PVE/Storage/Custom/ResticPVEPlugin.pm",
+			"Proxmox hands its record of changed blocks only to such a plug-in",
+			"restic-pve uninstall, and both are removed again.",
+			"► No: read every guest in full (nothing added)", "Yes: add the plug-in and the storage entry"},
+			[]string{"No keeps this host as it is"}, "Up/Down move · Enter choose · Esc back"},
 		{"restic-pve install · summary", "─ Summary ─", []string{
 			"a backup user with its key, a sudoers file, the binary and a daily update timer. Nothing changes before you choose Install.",
 			"Backup machine 192.0.2.10", "Public key ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFB", "Guests 100 (web)",
 			"Fleecing storage local", "Limits start with 32 GiB free stop below 8 GiB free read 40 MiB/s, 1 at a time",
-			"Backup user restic-backup", "[ Install ] [ Back ] [ Cancel ]"},
+			"Backup user restic-backup", "Changed reads off", "[ Install ] [ Back ] [ Cancel ]"},
 			[]string{"Cancel changes nothing."}, "Left/Right move · Enter press · Esc back"},
 	}
 	for _, c := range cases {
@@ -383,7 +389,7 @@ func TestFormScreens(t *testing.T) {
 		}
 	}
 	// the colours of the house style
-	s := screenOf(t, h, "step 1 of 5")
+	s := screenOf(t, h, "step 1 of 6")
 	blue := tcell.NewRGBColor(0x55, 0x55, 0xff)
 	if fg, bg, _ := s.styleOf(t, "Type the IP").Decompose(); bg != blue || fg != tcell.NewRGBColor(0xff, 0xff, 0xff) {
 		t.Errorf("text %v on %v", fg, bg)
@@ -407,7 +413,7 @@ func TestFormScreens(t *testing.T) {
 	if _, bg, _ := s.styleOf(t, "[ Back ]").Decompose(); bg != blue {
 		t.Errorf("Back focused: %v", bg)
 	}
-	s = screenOf(t, h, "step 5 of 5: Limits")
+	s = screenOf(t, h, "step 5 of 6: Limits")
 	if s.cursor {
 		t.Error("cursor shown on a list")
 	}
@@ -421,14 +427,14 @@ func TestFormExampleIsNeverTheValue(t *testing.T) {
 	code := h.form(enterKey, "192.0.2.10", enterKey, enterKey, ctrlC)
 	h.stopped(t, "examples", code, "cancelled")
 	s := screenOf(t, h, "an address or pattern for authorized_keys from=")
-	if !strings.Contains(s.text, "step 1 of 5") {
+	if !strings.Contains(s.text, "step 1 of 6") {
 		t.Fatalf("left the address screen:\n%s", s.text)
 	}
 	if _, bg, _ := s.styleOf(t, "an address").Decompose(); bg != tcell.NewRGBColor(0xaa, 0, 0) {
 		t.Errorf("rule not in the error style: %v", bg)
 	}
 	s = screenOf(t, h, "one line 'ssh-ed25519 <base64> [comment]'")
-	if !strings.Contains(s.text, "step 2 of 5") {
+	if !strings.Contains(s.text, "step 2 of 6") {
 		t.Fatalf("left the key screen:\n%s", s.text)
 	}
 	if term.stopped != 1 {
@@ -442,11 +448,11 @@ func TestFormInvalidValueStays(t *testing.T) {
 		rule string
 		step string
 	}{
-		{[]string{"192.0.2.10 x", enterKey}, "an address or pattern for authorized_keys from=", "step 1 of 5"},
-		{[]string{`a"b`, enterKey}, "an address or pattern", "step 1 of 5"},
-		{[]string{"192.0.2.10", enterKey, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ", enterKey}, "one line 'ssh-ed25519", "step 2 of 5"},
-		{[]string{"192.0.2.10", enterKey, key + "x", enterKey}, "one line 'ssh-ed25519", "step 2 of 5"},
-		{[]string{"192.0.2.10", enterKey, key, enterKey, enterKey}, "give at least one VM number", "step 3 of 5"},
+		{[]string{"192.0.2.10 x", enterKey}, "an address or pattern for authorized_keys from=", "step 1 of 6"},
+		{[]string{`a"b`, enterKey}, "an address or pattern", "step 1 of 6"},
+		{[]string{"192.0.2.10", enterKey, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ", enterKey}, "one line 'ssh-ed25519", "step 2 of 6"},
+		{[]string{"192.0.2.10", enterKey, key + "x", enterKey}, "one line 'ssh-ed25519", "step 2 of 6"},
+		{[]string{"192.0.2.10", enterKey, key, enterKey, enterKey}, "give at least one VM number", "step 3 of 6"},
 	}
 	for _, c := range cases {
 		h, _ := formHost(t)
@@ -459,7 +465,7 @@ func TestFormInvalidValueStays(t *testing.T) {
 	// a wrong value is fixed in place: Backspace and Ctrl-U, then the install goes through
 	h, _ := formHost(t)
 	through(t, "fixed", h.form("192.0.2.10 x", enterKey, bs, bs, enterKey, "nonsense", enterKey, ctrlU, key, enterKey,
-		" ", enterKey, enterKey, enterKey, enterKey), h)
+		" ", enterKey, enterKey, enterKey, enterKey, enterKey), h)
 	if text, _ := h.file(t, confFile); !strings.Contains(text, "VMIDS=100\n") {
 		t.Fatal(text)
 	}
@@ -482,7 +488,7 @@ func TestFormGuestListScrolls(t *testing.T) {
 	for i := 0; i < 15; i++ {
 		keys = append(keys, "k")
 	}
-	keys = append(keys, " ", enterKey, enterKey, enterKey, enterKey)
+	keys = append(keys, " ", enterKey, enterKey, enterKey, enterKey, enterKey)
 	through(t, "scroll", h.form(keys...), h)
 	if text, _ := h.file(t, confFile); !strings.Contains(text, "VMIDS=115 100\n") {
 		t.Fatalf("tick order not kept: %s", text)
@@ -494,13 +500,13 @@ func TestFormGuestListScrolls(t *testing.T) {
 	if !strings.Contains(s.help(), "1 ticked") {
 		t.Errorf("ticked count: %q", s.help())
 	}
-	s = screenOf(t, h, "step 3 of 5")
+	s = screenOf(t, h, "step 3 of 6")
 	if !strings.Contains(s.text, "more below)") || !strings.Contains(s.text, "guest-00") {
 		t.Fatalf("first guest screen:\n%s", s.text)
 	}
 	// Space unticks again
 	h, _ = formHost(t)
-	through(t, "untick", h.form("192.0.2.10", enterKey, key, enterKey, " ", "j", " ", "k", " ", enterKey, enterKey, enterKey, enterKey), h)
+	through(t, "untick", h.form("192.0.2.10", enterKey, key, enterKey, " ", "j", " ", "k", " ", enterKey, enterKey, enterKey, enterKey, enterKey), h)
 	if text, _ := h.file(t, confFile); !strings.Contains(text, "VMIDS=101\n") {
 		t.Fatal(text)
 	}
@@ -508,7 +514,7 @@ func TestFormGuestListScrolls(t *testing.T) {
 
 func TestFormStorageChoice(t *testing.T) {
 	h, _ := formHost(t)
-	through(t, "storage", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, down, down, up, "j", enterKey, enterKey, enterKey), h)
+	through(t, "storage", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, down, down, up, "j", enterKey, enterKey, enterKey, enterKey), h)
 	if text, _ := h.file(t, confFile); !strings.Contains(text, "FLEECING_STORAGE=local\n") {
 		t.Fatal(text)
 	}
@@ -517,14 +523,14 @@ func TestFormStorageChoice(t *testing.T) {
 func TestFormLimits(t *testing.T) {
 	// Keep is the default and writes the current limits
 	h, _ := formHost(t)
-	through(t, "keep", h.form("192.0.2.10", enterKey, key, enterKey, " ", "j", " ", enterKey, enterKey, enterKey, enterKey), h)
+	through(t, "keep", h.form("192.0.2.10", enterKey, key, enterKey, " ", "j", " ", enterKey, enterKey, enterKey, enterKey, enterKey), h)
 	if text, _ := h.file(t, confFile); text != confText {
 		t.Fatal(text)
 	}
 	// Change: four prefilled fields; a stop value not below the start value shows its rule
 	h, _ = formHost(t)
 	through(t, "change", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, enterKey, down, enterKey,
-		ctrlU, "64", enterKey, ctrlU, "64", enterKey, ctrlU, "16", enterKey, bs, bs, "20", enterKey, ctrlU, "2", enterKey, enterKey), h)
+		ctrlU, "64", enterKey, ctrlU, "64", enterKey, ctrlU, "16", enterKey, bs, bs, "20", enterKey, ctrlU, "2", enterKey, enterKey, enterKey), h)
 	s := screenOf(t, h, "FLEECING_ABORT_FREE_GIB must be below FLEECING_MIN_FREE_GIB (64)")
 	if !strings.Contains(s.text, "► Free space to stop (GiB)   64") {
 		t.Fatalf("not on the stop field:\n%s", s.text)
@@ -576,18 +582,18 @@ func TestFormLimits(t *testing.T) {
 func TestFormBackKeepsValues(t *testing.T) {
 	h, _ := formHost(t)
 	code := h.form("192.0.2.10", enterKey, esc, enterKey, key, enterKey, " ", btab, enterKey, enterKey, enterKey,
-		down, enterKey, esc, esc, enterKey, up, enterKey, right, enterKey, enterKey, left, left, left, enterKey)
+		down, enterKey, esc, esc, enterKey, up, enterKey, enterKey, right, enterKey, enterKey, left, left, left, enterKey)
 	through(t, "back", code, h)
 	// the last address screen is the one after Esc on the key screen, the last key screen
 	// the one after Shift-Tab on the guests
-	s := lastOf(t, h, "step 1 of 5")
+	s := lastOf(t, h, "step 1 of 6")
 	if !strings.Contains(s.main(), "> 192.0.2.10") {
 		t.Fatalf("address not kept:\n%s", s.text)
 	}
 	if fg, bg, _ := s.styleOf(t, "192.0.2.10").Decompose(); bg != tcell.NewRGBColor(0, 0, 0xaa) || fg != tcell.NewRGBColor(0xff, 0xff, 0xff) {
 		t.Fatalf("address not shown as a value: %v on %v", fg, bg)
 	}
-	if s := lastOf(t, h, "step 2 of 5"); !strings.Contains(s.text, "BQUFBQUFBQUFBQUFB") {
+	if s := lastOf(t, h, "step 2 of 6"); !strings.Contains(s.text, "BQUFBQUFBQUFBQUFB") {
 		t.Fatalf("key not kept:\n%s", s.text)
 	}
 	if text, _ := h.file(t, confFile); !strings.Contains(text, "VMIDS=100\n") || !strings.Contains(text, "FLEECING_STORAGE=fast-ssd\n") {
@@ -595,7 +601,7 @@ func TestFormBackKeepsValues(t *testing.T) {
 	}
 	// Cancel on the summary: nothing changed
 	h, _ = formHost(t)
-	h.stopped(t, "cancel button", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, enterKey, enterKey, tab, tab, enterKey), "cancelled")
+	h.stopped(t, "cancel button", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, enterKey, enterKey, enterKey, tab, tab, enterKey), "cancelled")
 	// the keys run out: the terminal ended
 	h, term := formHost(t)
 	h.stopped(t, "eof", h.form("192.0.2.10", enterKey), "the terminal closed")
@@ -607,7 +613,7 @@ func TestFormBackKeepsValues(t *testing.T) {
 func TestFormReinstallPrefill(t *testing.T) {
 	h, _ := formHost(t)
 	h.sys.Plain = true
-	if code := h.install(t, answers("192.0.2.10", key, "101 100", "local", "", "y")); code != 0 {
+	if code := h.install(t, answers("192.0.2.10", key, "101 100", "local", "", "", "y")); code != 0 {
 		t.Fatal(h.errb.String())
 	}
 	h.sys.Plain = false
@@ -615,20 +621,20 @@ func TestFormReinstallPrefill(t *testing.T) {
 		_ = os.MkdirAll(filepath.Dir(filepath.Join(h.root, name)), 0o755)
 		_ = os.WriteFile(filepath.Join(h.root, name), nil, 0o755)
 	}
-	through(t, "reinstall", h.form(enterKey, enterKey, enterKey, enterKey, enterKey, enterKey), h)
+	through(t, "reinstall", h.form(enterKey, enterKey, enterKey, enterKey, enterKey, enterKey, enterKey), h)
 	out := h.out.String()
 	if strings.Count(out, "unchanged ") != 6 || strings.Contains(out, "written ") {
 		t.Fatalf("not idempotent:\n%s", out)
 	}
-	s := screenOf(t, h, "step 1 of 5")
+	s := screenOf(t, h, "step 1 of 6")
 	if _, bg, _ := s.styleOf(t, "192.0.2.10").Decompose(); bg != tcell.NewRGBColor(0, 0, 0xaa) {
 		t.Fatalf("address not a real value:\n%s", s.text)
 	}
-	s = screenOf(t, h, "step 3 of 5")
+	s = screenOf(t, h, "step 3 of 6")
 	if !strings.Contains(s.text, "[x] 100") || !strings.Contains(s.text, "[x] 101") || !strings.Contains(s.text, "[ ] 102") {
 		t.Fatalf("guests not ticked:\n%s", s.text)
 	}
-	s = screenOf(t, h, "step 4 of 5")
+	s = screenOf(t, h, "step 4 of 6")
 	if !strings.Contains(s.text, "► (*) local") {
 		t.Fatalf("storage not chosen:\n%s", s.text)
 	}
@@ -645,14 +651,14 @@ func TestFormNoColor(t *testing.T) {
 			}
 		}
 	}
-	s := screenOf(t, h, "step 1 of 5")
+	s := screenOf(t, h, "step 1 of 6")
 	if !strings.HasPrefix(s.line(1), " ┌──") || !strings.Contains(s.line(1), "─ Backup machine address ─") || !strings.Contains(s.help(), "Example: 192.0.2.10") {
 		t.Fatalf("layout:\n%s", s.text)
 	}
 	if _, _, a := s.styleOf(t, " restic-pve install").Decompose(); a&tcell.AttrReverse == 0 {
 		t.Error("title bar not inverse")
 	}
-	s = lastOf(t, h, "step 3 of 5")
+	s = lastOf(t, h, "step 3 of 6")
 	if _, _, a := s.styleOf(t, "► [x] 100").Decompose(); a&tcell.AttrReverse == 0 {
 		t.Error("focused row not inverse")
 	}
@@ -663,7 +669,7 @@ func TestFormASCII(t *testing.T) {
 	h, term := formHost(t)
 	term.charset = "US-ASCII"
 	h.stopped(t, "ascii", h.form("192.0.2.10", enterKey, key, enterKey, ctrlC), "cancelled")
-	s := screenOf(t, h, "step 3 of 5")
+	s := screenOf(t, h, "step 3 of 6")
 	if !strings.HasPrefix(s.line(1), " +---") || !strings.Contains(s.line(1), "- Guests -") || !strings.Contains(s.text, "> [ ] 100") || !strings.Contains(s.line(23), "| restic-pve") {
 		t.Fatalf("not ASCII:\n%s", s.text)
 	}
@@ -700,7 +706,7 @@ func TestFormSmallestTerminal(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		keys = append(keys, "j", " ")
 	}
-	keys = append(keys, enterKey, enterKey, down, enterKey, enterKey, enterKey, enterKey, enterKey, ctrlC)
+	keys = append(keys, enterKey, enterKey, down, enterKey, enterKey, enterKey, enterKey, enterKey, enterKey, ctrlC)
 	h.stopped(t, "smallest", h.form(keys...), "cancelled")
 	s := lastOf(t, h, "Up/Down field")
 	for _, w := range []string{"Free space to start", "Free space to stop", "Read limit (MiB/s)", "► Backups at the same time"} {
@@ -830,5 +836,23 @@ func TestKeys(t *testing.T) {
 		if s := strings.Join(got, " "); s != c.want {
 			t.Errorf("paste %q: %q", c.in, s)
 		}
+	}
+}
+
+// The changed-reads step: Down and Enter choose yes; the summary says so; a reinstall starts
+// on yes.
+func TestFormChangedReads(t *testing.T) {
+	h, _ := formHost(t)
+	through(t, "yes", h.form("192.0.2.10", enterKey, key, enterKey, " ", enterKey, enterKey, enterKey, down, enterKey, enterKey), h)
+	s := screenOf(t, h, "summary")
+	if !strings.Contains(s.text, "Changed reads       on: plug-in and storage restic-pve") {
+		t.Fatalf("summary:\n%s", s.text)
+	}
+	if left := h.changedReadsLeft(); len(left) != 2 {
+		t.Fatalf("installed: %v", left)
+	}
+	h.form(enterKey, enterKey, enterKey, enterKey, enterKey, ctrlC)
+	if s := lastOf(t, h, "step 6 of 6"); !strings.Contains(s.text, "► Yes: add the plug-in") {
+		t.Fatalf("reinstall does not start on yes:\n%s", s.text)
 	}
 }

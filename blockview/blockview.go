@@ -28,6 +28,7 @@ const (
 	Empty              // read: it holds no data
 	Data               // holds data that is not in the backup yet
 	Handed             // read, and all its data is in the backup
+	Kept               // unchanged since the last backup: in the backup without being read
 )
 
 // Input is the state of a run: one Cell per block, and what is happening now.
@@ -44,15 +45,31 @@ type Input struct {
 	Writing int
 }
 
-// Run is the length of the yellow run: the number of blocks whose data is in the backup.
+// Run is the length of the yellow run: the number of blocks whose data is in the backup,
+// read in this run or kept from the last one.
 func (in Input) Run() int {
 	n := 0
 	for _, c := range in.Cells {
-		if c == Handed {
+		if c == Handed || c == Kept {
 			n++
 		}
 	}
 	return n
+}
+
+// Place returns the cells of a map drawn in place, for a probe: Proxmox's record is shown
+// where it lies on the disk, nothing moves. A block marked changed (or of a disk without a
+// record) is a block the next run reads (white); an unchanged one is shaded yellow.
+func Place(in Input) []retro.State {
+	cells := make([]retro.State, len(in.Cells))
+	for i, c := range in.Cells {
+		if c == Kept {
+			cells[i] = retro.DoneEmpty
+		} else {
+			cells[i] = retro.Data
+		}
+	}
+	return cells
 }
 
 // Pack returns the cells of the map and the length of the run.
@@ -95,8 +112,9 @@ func Pack(in Input) (cells []retro.State, run int) {
 // screen of at most limit cells; it returns the grouped input and k. A group is:
 // not read yet when all its blocks are; holding data when one of them holds data that is not
 // in the backup yet, or when it is partly read and some data is already in the backup; not
-// read yet when it is partly read and nothing in it held data so far; in the backup when the
-// rest is empty; empty otherwise. A group is being read when one of its blocks is, and had data
+// read yet when it is partly read and nothing in it held data so far; kept when all its blocks
+// are; in the backup when the rest is empty (kept blocks count as in the backup); empty
+// otherwise. A group is being read when one of its blocks is, and had data
 // last time when one of its blocks had.
 func Group(in Input, limit int) (Input, int) {
 	n := len(in.Cells)
@@ -110,7 +128,7 @@ func Group(in Input, limit int) (Input, int) {
 		out.Prior = make([]bool, g)
 	}
 	for gi := range g {
-		var unread, data, handed int
+		var unread, data, handed, kept int
 		lo, hi := gi*k, min((gi+1)*k, n)
 		for i := lo; i < hi; i++ {
 			switch in.Cells[i] {
@@ -120,21 +138,25 @@ func Group(in Input, limit int) (Input, int) {
 				data++
 			case Handed:
 				handed++
+			case Kept:
+				kept++
 			}
 			if i < len(in.Prior) && in.Prior[i] {
 				out.Prior[gi] = true
 			}
 		}
 		switch {
+		case kept == hi-lo:
+			out.Cells[gi] = Kept
 		case unread == hi-lo:
 			out.Cells[gi] = Unread
 		case data > 0:
 			out.Cells[gi] = Data
-		case unread > 0 && handed > 0:
+		case unread > 0 && handed+kept > 0:
 			out.Cells[gi] = Data
 		case unread > 0:
 			out.Cells[gi] = Unread
-		case handed > 0:
+		case handed+kept > 0:
 			out.Cells[gi] = Handed
 		default:
 			out.Cells[gi] = Empty

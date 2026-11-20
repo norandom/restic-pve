@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,17 +14,37 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/norandom/restic-pve/internal/nbd/nbdtest"
 )
 
 // The test binary acts as the wrapper when RESTICPVE_TEST_DIR is set (helper process).
 func TestMain(m *testing.M) {
+	if os.Getenv("RESTICPVE_TEST_NBD") != "" { // the fake NBD export of the fake vzdump
+		if err := nbdtest.Main(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "fake nbd:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if dir := os.Getenv("RESTICPVE_TEST_DIR"); dir != "" {
 		e := Default("v9.9.9")
 		e.ConfFile = filepath.Join(dir, "restic-pve.conf")
 		e.LockFile = filepath.Join(dir, "restic-pve.lock")
 		e.Path = filepath.Join(dir, "bin") + ":/usr/bin:/bin"
+		e.Root = filepath.Join(dir, "root")
+		e.QemuRun = filepath.Join(dir, "qemu-server")
 		if p, err := time.ParseDuration(os.Getenv("RESTICPVE_TEST_POLL")); err == nil {
 			e.SpacePoll = p
+		}
+		if p, err := time.ParseDuration(os.Getenv("RESTICPVE_TEST_ACK")); err == nil {
+			e.AckTimeout = p
+		}
+		if p, err := time.ParseDuration(os.Getenv("RESTICPVE_TEST_STALL")); err == nil {
+			e.StallTimeout = p
+		}
+		if os.Getenv("RESTICPVE_TEST_HOSTSYNC") != "" { // restic-pve host-sync, not a request
+			os.Exit(e.HostSync())
 		}
 		os.Exit(e.Run(os.Args[1:]))
 	}
@@ -93,6 +114,9 @@ cat "$S/pvesm-$3.txt"
 `,
 	"pveversion": `cat "$S/pveversion"
 `,
+	// stand-in for the Proxmox checks (timeout 60 perl -e <script>)
+	"perl": `touch "$S/../perl.ran"; case "$2" in *lookup*) cat "$S/perl-load.txt" ;; *) cat "$S/perl-api.txt" ;; esac
+`,
 	"vzdump": `for a in "$@"; do printf '%s\n' "$a"; done > "$S/vzdump.argv"
 nice > "$S/vzdump.nice"
 env > "$S/vzdump.env"
@@ -117,7 +141,12 @@ type result struct {
 }
 
 func newFixture(t *testing.T) *fixture {
-	dir := t.TempDir()
+	// a short path: Unix socket paths (the job socket, the fake NBD export) have 108 bytes
+	dir, err := os.MkdirTemp("", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	f := &fixture{t: t, dir: dir, state: filepath.Join(dir, "state"), home: filepath.Join(dir, "home"), poll: "15s"}
 	for _, d := range []string{"bin", "state", "home"} {
 		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
@@ -132,6 +161,7 @@ func newFixture(t *testing.T) *fixture {
 		"vm-100.conf": vm100, "vm-100.status": "running", "vm-100.agent": "0",
 		"vm-101.conf": vm101, "vm-101.status": "stopped", "pvesm-fast-ssd.txt": pvesm(859786032, "fast-ssd", "active"),
 		"pvesm-list-100.txt": "Volid Format Type Size VMID\n", "pveversion": pvever,
+		"perl-api.txt": "api 17 8 base 1\n", "perl-load.txt": "loaded\n",
 	} {
 		f.set(name, text)
 	}
@@ -278,7 +308,8 @@ func TestInfoJSON(t *testing.T) {
 		`"agent_running":true,"disks":["efidisk0","scsi0","tpmstate0"],"vmstate_present":false,"fleecing_ok":true,` +
 		`"fleecing_avail_bytes":880420896768,"fleecing_leftovers":[],"fleecing_in_config":false,` +
 		`"conf":{"fleecing_storage":"fast-ssd","fleecing_min_free_gib":"32","fleecing_abort_free_gib":"8",` +
-		`"bwlimit_kib":"40960","max_workers":"1"},"pve_version":"9.0.3","version":"v9.9.9"}` + "\n"
+		`"bwlimit_kib":"40960","max_workers":"1"},"pve_version":"9.0.3","version":"v9.9.9",` +
+		`"provider":{"plugin":"absent","storage":false,"active":false,"cluster":false,"api":"unchecked"}}` + "\n"
 	if r.code != 0 || r.stdout != want {
 		t.Fatalf("%d %q\n got %s\nwant %s", r.code, r.stderr, r.stdout, want)
 	}
@@ -437,7 +468,11 @@ var refused = []string{
 	"dump abc", "dump -1", "dump 0100", "dump 1e2", "dump 99", "dump +100", "dump 100.0",
 	"PING", "help", "--help", "ping\tx",
 	"snap-create 100", "snap-delete 100", "disks 100", "config 100", "read 100 scsi0",
-	"install x", "update", "version", "request ping", "uninstall",
+	"install x", "update", "version", "request ping", "uninstall", "host-sync",
+	"changes", "changes 100", "changes 100 full", "changes 100 PROBE", "changes 100 probe extra", "changes 102 probe",
+	"changes 100 use;id", "changes 100 --storage", "changes 100 probe --storage local", "changes probe 100",
+	"changes 100 new\tx", "changes abc use", "changes 0100 new", "changes 100 $(id)", "changes 100 probe;id",
+	"changes 100 use --bwlimit 0", "changes 100 use --dumpdir /tmp", "changes 100 ../../x",
 }
 
 func TestRefusalChecklist(t *testing.T) {

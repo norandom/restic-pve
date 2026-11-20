@@ -190,6 +190,7 @@ sub list_volumes { return [] }
 sub list_images { return [] }
 sub prune_backups { return [] }
 sub get_volume_attribute { return }
+sub update_volume_attribute { return } # vzdump sets notes or protected from site defaults: no volume, nothing to set
 sub volume_has_feature { return 0 }
 
 sub parse_volname { die $NO_VOLUMES }
@@ -205,6 +206,5 @@ sub volume_resize { die $NO_VOLUMES }
 sub volume_snapshot { die $NO_VOLUMES }
 sub volume_snapshot_rollback { die $NO_VOLUMES }
 sub volume_snapshot_delete { die $NO_VOLUMES }
-sub update_volume_attribute { die $NO_VOLUMES }
 
 1;

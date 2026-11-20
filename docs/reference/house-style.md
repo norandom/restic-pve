@@ -253,6 +253,37 @@ on the bottom bar. Legend footer: "Guest <id>:  1 block = <size>". The bottom ba
 leaves the view and the backup goes on. When no backup runs, the screen says so in a sentence and
 names the command that starts one.
 
+#### The probe view
+
+`restic-pve pieces --job FILE` with mode `probe` shows Proxmox's record of changed blocks for a
+guest, as the map of the same view, drawn in place: nothing moves into a run, because nothing is
+read and nothing is stored. A white block is a part the next run would read (Proxmox marks it
+changed, or the disk has no record yet); a yellow-shaded block is unchanged. Title:
+`Guest <id> (<alias>) · probe · record reuse|new|none · <size> disk`. Status box: "To read N"
+(pieces of 4 MiB) and its share of the disk, the elapsed time, and "Probe: nothing read or
+stored". Legend: "To read" and "Unchanged", and the size of one block. Bottom bar at the end:
+`Probe done: 97 of 8193 pieces (4 MiB each) changed; nothing read or stored`, or for a disk
+without a record `Probe done: record new, the next run reads in full; nothing read or stored`.
+The view stays until `q`; it redraws only when the state file changes. Without a terminal the
+plain line is the result message. Captures from a trial with stand-ins: a disk with a record
+and 97 changed pieces, a first probe (`new`), and a guest whose disks have no record (`none`).
+
+#### The state file (format version 2)
+
+Version 2 adds one cell and three fields; `restic-pve watch` reads versions 1 and 2, and a
+version-1 file is a full read.
+
+- Cell `=`: unchanged, kept from the last backup: not read in a changed-blocks run (or read and
+  equal in a full read). In the packed view it counts as in the backup and joins the yellow run.
+- `kind full|changes|check|probe` after `mode`: the kind of run. `stream backup` writes `full`.
+- `skipped <bytes>`: the bytes not read because unchanged.
+- `records <disk>=<none|new|reuse>:<changed>/<pieces> ...`: Proxmox's record per disk, as a
+  provider job reported it, with the pieces of 4 MiB it marks changed and the disk's pieces
+  (at most 16 disks; empty for a full read). This field is an addition to the design's two.
+
+A probe's final map is not kept as the guest's last map (`vm-<vmid>.last`), which stays the
+layout of a real read.
+
 #### The state file (format version 1)
 
 `restic-pve stream backup --view-dir DIR` writes `DIR/live` at most twice a second (write to a temporary

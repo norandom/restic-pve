@@ -15,6 +15,11 @@ var Legend = []retro.LegendEntry{
 	{State: retro.Done, Text: "In backup"}, {State: retro.Unread, Text: "Not read yet"},
 }
 
+// ProbeLegend is what the cells of a probe mean: the map is Proxmox's record, drawn in place.
+var ProbeLegend = []retro.LegendEntry{
+	{State: retro.Data, Text: "To read"}, {State: retro.DoneEmpty, Text: "Unchanged"},
+}
+
 // MapSize is the number of map cells on a screen of cols x rows.
 func MapSize(cols, rows int) int {
 	l := retro.NewLayout(cols, rows)
@@ -27,8 +32,9 @@ type Screen struct {
 	Title   string // title bar, left
 	Key     string // title bar, right (e.g. "q=Quit")
 	Cells   []retro.State
-	Block   int // Status line 1, left
-	Percent int // Status line 1, right, and the progress track
+	Label   string // Status line 1, the word before the number ("" = "Block")
+	Block   int    // Status line 1, left
+	Percent int    // Status line 1, right, and the progress track
 	Elapsed time.Duration
 	Mode    string // Status line 4: "Full backup", "Done in hh:mm:ss", ...
 	Legend  []retro.LegendEntry
@@ -50,7 +56,7 @@ func (s Screen) Draw(screen tcell.Screen, t retro.Theme) {
 	m.Draw(screen)
 
 	st := retro.NewStatusBox(t)
-	st.Block, st.Percent, st.Elapsed, st.Mode = s.Block, s.Percent, s.Elapsed, s.Mode
+	st.Label, st.Block, st.Percent, st.Elapsed, st.Mode = s.Label, s.Block, s.Percent, s.Elapsed, s.Mode
 	st.SetRect(1, l.LowerY, l.LeftW, retro.LowerHeight)
 	st.Draw(screen)
 

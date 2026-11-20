@@ -86,6 +86,7 @@ func (m *BlockMap) Draw(screen tcell.Screen) {
 type StatusBox struct {
 	*tview.Box
 	T       Theme
+	Label   string // the word before the number on line 1; "" is "Block"
 	Block   int
 	Percent int
 	Elapsed time.Duration
@@ -108,7 +109,11 @@ func (b *StatusBox) Draw(screen tcell.Screen) {
 	if w <= 0 || h < 4 {
 		return
 	}
-	LeftRight(screen, x, y, w, fmt.Sprintf("Block %d", b.Block), fmt.Sprintf("%d%%", b.Percent), b.T.Base)
+	label := b.Label
+	if label == "" {
+		label = "Block"
+	}
+	LeftRight(screen, x, y, w, fmt.Sprintf("%s %d", label, b.Block), fmt.Sprintf("%d%%", b.Percent), b.T.Base)
 	b.T.Progress(screen, x, y+1, w, float64(b.Percent)/100)
 	Center(screen, x, y+2, w, "Elapsed Time: "+Elapsed(b.Elapsed), b.T.Base)
 	Center(screen, x, y+3, w, b.Mode, b.T.Base)

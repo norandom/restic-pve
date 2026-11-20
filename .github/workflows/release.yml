@@ -67,6 +67,9 @@ jobs:
             exit 1
           fi
           go vet ./...
+          # Go-only tests: the tests that need Perl (the Proxmox plug-in, request changes) or
+          # restic 0.19.1 skip here. They are a required manual gate before a tag:
+          # docs/reference/build-and-test.md, "Tests that need restic or Perl".
           go test ./...
           GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags="-s -w -buildid= -X main.version=$TAG -X main.releaseRepo=$REPO" \

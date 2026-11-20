@@ -211,3 +211,23 @@ func TestScreenAndNotice(t *testing.T) {
 		t.Error("notice")
 	}
 }
+
+// Kept blocks (unchanged since the last backup) are in the backup without being read: they
+// join the run when packed, stay shaded in place, and a group of them is kept.
+func TestKept(t *testing.T) {
+	in := Input{Cells: []Cell{Kept, Kept, Unread, Kept, Handed, Kept}}
+	if in.Run() != 5 {
+		t.Fatalf("run %d", in.Run())
+	}
+	cells, run := Pack(in)
+	if run != 5 || cells[4] != retro.Done || cells[5] != retro.Empty {
+		t.Fatalf("pack %v %d", cells, run)
+	}
+	if p := Place(in); p[0] != retro.DoneEmpty || p[2] != retro.Data || p[4] != retro.Data {
+		t.Fatalf("place %v", p)
+	}
+	g, k := Group(in, 3)
+	if k != 2 || g.Cells[0] != Kept || g.Cells[1] != Data || g.Cells[2] != Handed {
+		t.Fatalf("group %v %d", g.Cells, k)
+	}
+}

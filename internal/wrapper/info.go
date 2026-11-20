@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/norandom/restic-pve/internal/provider"
 )
 
 var (
@@ -164,6 +166,49 @@ func (e *Env) info(vmid string, c Conf) error {
 		`","max_workers":"`+c.MaxWorkers+`"}`)
 	w("pve_version", jsonStr(pveVersion))
 	w("version", jsonStr(e.Version))
+	w("provider", e.providerInfo())
 	_, err = e.Stdout.WriteString("{" + b.String() + "}\n")
 	return err
+}
+
+// providerInfo is the state of changed reads on this host: the plug-in file (absent, current:
+// this binary's copy, different: another release's, foreign: not restic-pve's), whether the
+// storage entry exists and whether Proxmox shows it active. pvesm is asked only when the
+// entry exists, so a host without the feature runs no extra command.
+func (e *Env) providerInfo() string {
+	h := e.host()
+	st, err := h.PluginState()
+	plugin := st.String()
+	if err != nil {
+		plugin = "unreadable"
+	}
+	typ, _ := h.StorageEntry()
+	entry, active := typ == provider.StorageType, false
+	if entry {
+		if out, err := e.output("pvesm", "status", "--storage", provider.StorageID); err == nil {
+			for _, line := range strings.Split(out, "\n") {
+				f := fields(line)
+				active = active || field(f, 0) == provider.StorageID && field(f, 2) == "active"
+			}
+		}
+	}
+	// the storage API, only for a plug-in of ours: "ok", "newer" (Proxmox warns about the older
+	// API in its commands until restic-pve is updated), "unsupported" (Proxmox refuses it), or
+	// "unknown"; "unchecked" without a plug-in
+	api := "unchecked"
+	if st == provider.Current || st == provider.Different {
+		a, err := h.ProxmoxAPI()
+		switch {
+		case err != nil:
+			api = "unknown"
+		case a.Problem() != nil:
+			api = "unsupported"
+		case a.Newer():
+			api = "newer"
+		default:
+			api = "ok"
+		}
+	}
+	return `{"plugin":"` + plugin + `","storage":` + strconv.FormatBool(entry) + `,"active":` + strconv.FormatBool(active) +
+		`,"cluster":` + strconv.FormatBool(h.Clustered()) + `,"api":"` + api + `"}`
 }

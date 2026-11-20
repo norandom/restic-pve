@@ -39,6 +39,17 @@ The form shows frames of `+`, `-` and `|`: the terminal's language setting is no
 example `LANG=C`). It works the same. No form at all, only questions: the terminal is smaller
 than 60 by 20, or `TERM` is `dumb`.
 
+### Changed reads
+
+| Message | What to do |
+|---|---|
+| `restic-pve: changed reads: this host is part of a Proxmox cluster ...; nothing changed` | Changed reads work on single hosts for now. Run `restic-pve install` again and answer no to changed reads; backups read every guest in full as before. |
+| `restic-pve: changed reads: this Proxmox has no backup provider interface ...; changed reads need Proxmox VE 8.4 or later` | Update Proxmox VE, or answer no. |
+| `restic-pve: changed reads: this Proxmox (storage API N) no longer accepts the plug-in of this restic-pve ...` | Run `restic-pve update`, then `restic-pve install` again. |
+| `note      this Proxmox (storage API N) is newer than the plug-in was checked against ...` | Changed reads work, but Proxmox prints `... is implementing an older storage API, an upgrade is recommended` in its commands (also in the log of an ordinary backup) until you run `restic-pve update`. |
+| `Proxmox did not load the plug-in (...); the plug-in file is as it was before` | The text in brackets is what Proxmox said. Nothing else changed; answer no, or report the text. |
+| `restic-pve: uninstall not complete: left on this host: ... To finish: ...` | Run the command it names, then `restic-pve uninstall` again. The binary was kept for that. Exit 1. |
+
 ### Messages the backup machine passes on
 
 These come from `restic-pve request` on the host and show up in the backup machine's logs.
@@ -49,6 +60,16 @@ These come from `restic-pve request` on the host and show up in the backup machi
 | `restic-pve: error: busy: another dump is running on this host` | Another guest is being sent. The stream marks this as transient, so a later try can work. Exit 75. |
 | `restic-pve: error: fleecing storage local has 20 GiB free, below FLEECING_MIN_FREE_GIB=32; dump not started` | Free space on that storage, or pick another one with `restic-pve install`. Exit 73. |
 | `restic-pve: error: /etc/restic-pve.conf missing (run restic-pve install again)` | Run `restic-pve install` again. Exit 78. |
+
+### Changed reads: messages the backup machine passes on
+
+| Message | What to do |
+|---|---|
+| `plug-in not ready: changed reads are off on this host; run restic-pve install on the Proxmox host and answer yes to changed reads` (exit 79) | Turn changed reads on, or leave the guest on full reads. |
+| `plug-in not ready: this host is part of a Proxmox cluster; ...` (exit 79) | Changed reads work on single hosts for now; run install and answer no. |
+| `plug-in not ready: the storage entry restic-pve is missing` or `Proxmox did not load the plug-in` (exit 79) | Run `restic-pve install` on the host and answer yes; the `"provider"` part of `request info` shows the details. |
+| `the backup machine read nothing of the stream for 10m0s` | The backup machine stopped reading (stalled or lost). The job ended and Proxmox counted it failed; the next run reads the changes again. Look at the backup machine's log of that run. |
+| `no valid ack: none within 1h0m0s after the end of the stream` | The backup machine did not confirm within an hour. The job ended as failed; nothing is lost, the next run covers the changes. |
 
 ## On the backup machine
 

@@ -31,6 +31,14 @@ type Options struct {
 	SSHConfig, Host string
 	VMID            uint32
 	SSHProgram      string // bare program name looked up in PATH; "" = DefaultProgram
+	// Request replaces "dump <vmid>" (for example "changes 100 probe"); each word must be a
+	// plain argument.
+	Request []string
+	// Ack: the process gets a stdin pipe (Process.Stdin) for the ack line of a changes
+	// request; otherwise stdin is empty.
+	Ack bool
+	// Env is the environment of ssh; nil inherits this process's.
+	Env []string
 }
 
 // Events receives the classified log. Calls come from a background
@@ -81,6 +89,7 @@ const (
 	exitSSHConnection = 255 // ssh: connection, authentication or host key failure
 	exitWrapperBusy   = 75  // wrapper: PVE-side lock held (EX_TEMPFAIL)
 	exitWrapperSpace  = 73  // wrapper: fleecing storage below its free-space limit
+	exitNotReady      = 79  // wrapper: the plug-in or the storage entry of changed reads is not ready
 )
 
 func optionErr(format string, a ...any) error {
@@ -111,7 +120,19 @@ func Args(o Options) ([]string, error) {
 	if o.VMID == 0 {
 		return nil, optionErr("vmid must be a positive decimal number")
 	}
-	args := []string{"-F", o.SSHConfig, "-T", "-o", "BatchMode=yes", o.Host, "dump", strconv.FormatUint(uint64(o.VMID), 10)}
+	req := []string{"dump", strconv.FormatUint(uint64(o.VMID), 10)}
+	if o.Request != nil {
+		if len(o.Request) == 0 || len(o.Request) > 4 {
+			return nil, optionErr("request of %d words", len(o.Request))
+		}
+		for _, w := range o.Request {
+			if !plainArg(w) {
+				return nil, optionErr("request word %q must be a plain argument", w)
+			}
+		}
+		req = o.Request
+	}
+	args := append([]string{"-F", o.SSHConfig, "-T", "-o", "BatchMode=yes", o.Host}, req...)
 	return args, nil
 }
 
@@ -121,6 +142,7 @@ type Process struct {
 	cancel context.CancelFunc
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
+	stdin  io.WriteCloser
 	lines  *lineWriter
 	cls    *Classifier
 	ev     Events
@@ -154,8 +176,15 @@ func Open(ctx context.Context, o Options, ev Events) (io.ReadCloser, Waiter, err
 	p := &Process{parent: ctx, cancel: cancel, cls: NewClassifier(), ev: ev}
 	p.cmd = exec.CommandContext(cctx, path, args...)
 	p.cmd.WaitDelay = waitDelay
+	p.cmd.Env = o.Env
 	p.lines = &lineWriter{onLine: p.line}
 	p.cmd.Stderr = p.lines
+	if o.Ack {
+		if p.stdin, err = p.cmd.StdinPipe(); err != nil {
+			cancel()
+			return nil, nil, &Error{Kind: ErrSourceFailed, ExitCode: -1, Detail: fmt.Sprintf("ssh stdin: %v", err)}
+		}
+	}
 	p.stdout, err = p.cmd.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -180,6 +209,9 @@ func (p *Process) line(l string) {
 }
 
 func (p *Process) Read(b []byte) (int, error) { return p.stdout.Read(b) }
+
+// Stdin is the process's stdin (Options.Ack), nil otherwise.
+func (p *Process) Stdin() io.WriteCloser { return p.stdin }
 
 // Close closes the stream side; the process is reaped by Wait.
 func (p *Process) Close() error { return p.stdout.Close() }
@@ -249,6 +281,8 @@ func (p *Process) outcome(err error) error {
 		e.Detail = "PVE wrapper busy (exit 75)"
 	case exitWrapperSpace:
 		e.Detail = "fleecing storage on PVE below its free-space limit (exit 73); see the vzdump log line"
+	case exitNotReady:
+		e.Detail = "the Proxmox plug-in is not ready (exit 79); run restic-pve install on the Proxmox host"
 	case -1:
 		e.Transient = true // killed by a signal we did not send
 		e.Detail = "ssh terminated: " + ee.Error()

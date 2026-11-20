@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -153,7 +154,7 @@ func Input(s, prior *blockmap.State) blockview.Input {
 	in := blockview.Input{Cells: make([]blockview.Cell, len(s.Map))}
 	for i, c := range s.Map {
 		in.Cells[i] = map[byte]blockview.Cell{blockmap.CellUnread: blockview.Unread, blockmap.CellEmpty: blockview.Empty,
-			blockmap.CellData: blockview.Data, blockmap.CellHanded: blockview.Handed}[c]
+			blockmap.CellData: blockview.Data, blockmap.CellHanded: blockview.Handed, blockmap.CellKept: blockview.Kept}[c]
 	}
 	if prior != nil && len(prior.Map) == len(s.Map) {
 		in.Prior = make([]bool, len(s.Map))
@@ -233,6 +234,9 @@ func Build(snap Snapshot, sp *Speed, watched bool, now time.Time, cols, rows int
 			fmt.Sprintf("%s: the backup has started and waits for the Proxmox host to send the disk.", guestName(s)),
 			"Elapsed: "+retro.Elapsed(elapsed(s, now))+".")
 	}
+	if s.Kind == blockmap.KindProbe {
+		return Frame{Screen: probeScreen(s, now, cols, rows)}
+	}
 	in, k := blockview.Group(Input(s, snap.Prior), blockview.MapSize(cols, rows))
 	cells, run := blockview.Pack(in)
 	blockBytes := float64(s.Disk) / float64(len(s.Map)) * float64(k)
@@ -265,9 +269,88 @@ func Build(snap Snapshot, sp *Speed, watched bool, now time.Time, cols, rows int
 	return Frame{Screen: &f}
 }
 
+// probeScreen is the block view of a probe: Proxmox's record drawn in place, the count of
+// changed blocks in the Status box and, there and on the message line, that nothing is read
+// or stored.
+func probeScreen(s *blockmap.State, now time.Time, cols, rows int) *blockview.Screen {
+	in, k := blockview.Group(Input(s, nil), blockview.MapSize(cols, rows))
+	var changed, all uint64
+	record := "reuse" // the guest's record: reuse only when every disk has one
+	for _, r := range s.Records {
+		all += r.Pieces
+		if r.State == "reuse" {
+			changed += r.Changed
+		} else {
+			changed += r.Pieces
+			if record != "none" {
+				record = r.State
+			}
+		}
+	}
+	pct := 0
+	if all > 0 {
+		pct = int(changed * 100 / all)
+	}
+	f := &blockview.Screen{
+		Title:   guestName(s) + " · probe · record " + record + " · " + Size(float64(s.Disk)) + " disk",
+		Key:     "q=Leave view",
+		Cells:   blockview.Place(in),
+		Label:   "To read",
+		Block:   int(changed),
+		Percent: pct,
+		Elapsed: elapsed(s, now),
+		Mode:    "Probe: nothing read or stored",
+		Legend:  blockview.ProbeLegend,
+		Footer:  fmt.Sprintf("Guest %d:  1 block = %s", s.VMID, Size(float64(s.Disk)/float64(len(s.Map))*float64(k))),
+		Brand:   "restic-pve probe",
+	}
+	switch {
+	case s.Status == blockmap.Running:
+		f.Msg = "Asking Proxmox which blocks changed..."
+		f.Brand = Brand
+	case s.Status == blockmap.Failed:
+		f.Mode = "Probe failed"
+		f.Msg, f.Brand = "Failed: "+s.Message, logHint
+	case record == "reuse":
+		f.Msg = fmt.Sprintf("Probe done: %d of %d pieces (4 MiB each) changed; nothing read or stored", changed, all)
+	default:
+		f.Msg = "Probe done: record " + record + ", the next run reads in full; nothing read or stored"
+	}
+	if len(s.Records) == 0 { // Proxmox has not answered yet
+		f.Title = guestName(s) + " · probe · " + Size(float64(s.Disk)) + " disk"
+	}
+	return f
+}
+
+// probeSummary says per disk what Proxmox reported, and that nothing was read or stored.
+func probeSummary(s *blockmap.State) string {
+	var parts []string
+	for _, r := range s.Records {
+		if r.State == "reuse" {
+			parts = append(parts, fmt.Sprintf("%s record reuse, %d of %d pieces of 4 MiB changed (%s)", r.Disk, r.Changed, r.Pieces,
+				Size(float64(r.Changed)*4*(1<<20))))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s record %s: no record yet, the next run reads it in full", r.Disk, r.State))
+		}
+	}
+	if len(parts) == 0 {
+		parts = []string{"no disk reported"}
+	}
+	return strings.Join(parts, "; ") + "; nothing was read or stored"
+}
+
 // Line is the state as one plain line, for a run without a terminal.
 func Line(snap Snapshot, now time.Time, start string) string {
 	s := snap.Live
+	if s != nil && s.Kind == blockmap.KindProbe && snap.Err == nil && !(s.Status == blockmap.Running && now.Sub(s.Updated) > Stale) {
+		switch s.Status {
+		case blockmap.Running:
+			return fmt.Sprintf("probe of %s: asking Proxmox which blocks changed; nothing is read or stored", lowerGuest(s))
+		case blockmap.Failed:
+			return fmt.Sprintf("probe of %s failed: %s", lowerGuest(s), s.Message)
+		}
+		return fmt.Sprintf("probe of %s: %s", lowerGuest(s), probeSummary(s))
+	}
 	switch {
 	case snap.Err != nil:
 		return "cannot read the guest backup's state: " + snap.Err.Error()

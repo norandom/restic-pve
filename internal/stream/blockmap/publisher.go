@@ -149,7 +149,7 @@ func (p *Publisher) write(s *State, final bool) bool {
 	if err == nil {
 		err = p.atomicWrite(LiveFile, b)
 	}
-	if err == nil && final && c.Status == Done {
+	if err == nil && final && c.Status == Done && c.Kind != KindProbe { // a probe is no layout of the disk
 		err = p.atomicWrite(LastFile(p.vmid), b)
 	}
 	if err != nil {

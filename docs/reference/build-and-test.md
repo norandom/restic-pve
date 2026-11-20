@@ -38,9 +38,10 @@ shared library on either machine.
 ## Size
 
 Release binary, linux/amd64, `golang:1.27.1-alpine3.24`, the workflow's flags, measured
-2026-11-20: 9,134,204 bytes (8.7 MiB) with both roles and the status, keys and space screens.
-The packages for changed-block reads (`internal/pieces`, `internal/nbd`,
-`internal/stream/changes`, `internal/provider`) are not linked into it yet. On 2026-11-19 it was
+2026-11-20 with changed reads on the host side (plug-in management, job server, NBD client,
+the `changes` request) and the probe of `pieces`: 9,449,596 bytes (9.0 MiB). Before them, the
+same day: 9,134,204 bytes (8.7 MiB) with both roles and the status, keys and space screens. On
+2026-11-19 it was
 9,072,764 bytes; before the screens 8,544,380 bytes, and the host role alone 7,471,228 bytes
 (7.1 MiB). The project's limit is 16 MiB; no workflow step checks it, so measure after a change
 that adds a library. `restic-pve update` refuses a binary larger than 64 MiB.
@@ -57,6 +58,9 @@ No test needs a Proxmox host or root:
 
 - The NBD client tests run against a fake NBD server in Go (`internal/nbd/nbdtest`), which
   serves an export with a dirty bitmap and can break the protocol in a dozen ways.
+  `internal/nbd/nbdtest/fakenbd` is the same server as a program, for trials without Proxmox; it
+  is never part of a release.
+- The `pieces` probe tests use the test binary as `ssh` and the Proxmox side behind it.
 
 ## Tests that need restic or Perl
 
@@ -95,14 +99,20 @@ docker run --rm -u "$(id -u):$(id -g)" -e CGO_ENABLED=0 -e GOPROXY=off -e GOTOOL
   -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e RESTIC_PVE_TEST_RESTIC=/fix/restic-0.19.1 \
   -v "$PWD:/src:ro" -v "$PWD/fix:/fix" -w /src golang:1.27.1-alpine3.24 sh -c 'go test -count=1 ./... &&
   RESTIC_PVE_TEST_REQUIRE=1 go test -count=1 ./internal/pieces ./internal/testfix &&
-  go test -c -o /fix/provider.test ./internal/provider'
-docker run --rm -u "$(id -u):$(id -g)" -e RESTIC_PVE_TEST_REQUIRE=1 -v "$PWD:/src:ro" -v "$PWD/fix:/fix:ro" \
-  -w /src/internal/provider perl:5.40-slim /fix/provider.test -test.count=1 -test.v
+  go test -c -o /fix/provider.test ./internal/provider && go test -c -o /fix/wrapper.test ./internal/wrapper'
+for p in provider wrapper; do docker run --rm -u "$(id -u):$(id -g)" -e RESTIC_PVE_TEST_REQUIRE=1 \
+  -v "$PWD:/src:ro" -v "$PWD/fix:/fix:ro" -w /src/internal/$p perl:5.40-slim /fix/$p.test -test.count=1 -test.v; done
 ```
 
+The release workflow runs only the first part (`go test ./...` in the Go image, the Perl and
+restic tests skipped). The Perl-dependent tests are a required manual gate before a tag: run
+both commands above with `RESTIC_PVE_TEST_REQUIRE=1` and a clean result.
+
 The first command runs every test (the Perl ones skip: the Go image has no Perl), then the
-restic tests again with skips turned into failures, and builds the plug-in tests as a static
-test binary. The second runs that binary next to Perl 5.40, the Perl of Debian 13 on which
+restic tests again with skips turned into failures, and builds the plug-in and the request tests
+as static test binaries. The second runs them next to Perl 5.40 (the request tests run the
+`changes` request end to end: the real plug-in loaded by the Perl stand-in of vzdump, a fake NBD
+export, the job server), the Perl of Debian 13 on which
 Proxmox VE 9 is built, also with skips turned into failures. What the plug-in tests cannot
 show is in
 [provider-plugin.md](provider-plugin.md#tests-without-proxmox).

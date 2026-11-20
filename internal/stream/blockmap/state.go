@@ -16,13 +16,26 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Magic is the first line of a state file, with the format version.
-const Magic = "vmastream-view 1"
+// Magic is the first line of a state file, with the format version. Version 2 adds the cell
+// "=" and the fields kind, skipped and records; a reader takes versions 1 and 2.
+const (
+	Magic   = "vmastream-view 2"
+	MagicV1 = "vmastream-view 1"
+)
+
+// Kinds of a run (field kind; a version-1 file is a full read).
+const (
+	KindFull    = "full"    // the whole disk is read from the Proxmox host
+	KindChanges = "changes" // only the pieces Proxmox's record marks are read
+	KindCheck   = "check"   // a full read compared with the last backup
+	KindProbe   = "probe"   // Proxmox's record is looked at; nothing is read or stored
+)
 
 // MaxCells is the number of cells of a map; a disk with fewer clusters has one cell per
 // cluster.
@@ -50,15 +63,20 @@ const (
 	CellEmpty  = '.' // every cluster arrived; none held data
 	CellData   = 'o' // data arrived; not all of it is written to the stream yet, or the cell is not complete
 	CellHanded = '#' // every cluster arrived and all its data is written to the stream
+	CellKept   = '=' // unchanged, kept from the last backup: not read in a changed-blocks run (version 2)
 )
 
 // State is one snapshot of a stream. The file holds one "key value" line per field, in this
 // order, and ends with the map line:
 //
-//	vmastream-view 1
+//	vmastream-view 2
 //	guest 100                 guest id
 //	name web                  guest alias (may be empty)
-//	mode full                 kind of backup
+//	mode full                 kind of backup (free text of version 1, kept)
+//	kind changes              full | changes | check | probe (version 2)
+//	skipped 1234567           bytes not read because unchanged (version 2)
+//	records drive-scsi0=reuse:3/16 ...  per disk: Proxmox's record state, changed and all
+//	                          pieces of 4 MiB (version 2; empty for a full read)
 //	status running            running | done | failed
 //	started 1763380000123     Unix milliseconds
 //	updated 1763380012456     Unix milliseconds of this snapshot
@@ -75,6 +93,9 @@ type State struct {
 	VMID    uint32
 	Name    string
 	Mode    string
+	Kind    string // "" in a version-1 file: a full read
+	Skipped uint64
+	Records []Record
 	Status  string
 	Started time.Time
 	Updated time.Time
@@ -89,6 +110,16 @@ type State struct {
 	Map     []byte
 }
 
+// Record is one disk's change record as Proxmox reported it to a provider job.
+type Record struct {
+	Disk    string // device name, e.g. drive-scsi0
+	State   string // none | new | reuse
+	Changed uint64 // pieces of 4 MiB marked changed (reuse only)
+	Pieces  uint64 // pieces of the disk
+}
+
+var recordRe = regexp.MustCompile(`^([A-Za-z0-9_.-]{1,64})=(none|new|reuse):([0-9]{1,12})/([0-9]{1,12})$`)
+
 // oneLine keeps a text field on one line and short.
 func oneLine(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
@@ -102,8 +133,15 @@ func oneLine(s string, n int) string {
 func (s *State) Encode() []byte {
 	var b bytes.Buffer
 	b.Grow(len(s.Map) + 400)
-	fmt.Fprintf(&b, "%s\nguest %d\nname %s\nmode %s\nstatus %s\nstarted %d\nupdated %d\n", Magic, s.VMID,
-		oneLine(s.Name, 64), oneLine(s.Mode, 32), s.Status, s.Started.UnixMilli(), s.Updated.UnixMilli())
+	fmt.Fprintf(&b, "%s\nguest %d\nname %s\nmode %s\nkind %s\nskipped %d\nrecords", Magic, s.VMID,
+		oneLine(s.Name, 64), oneLine(s.Mode, 32), s.kind(), s.Skipped)
+	for i, r := range s.Records {
+		if i == 16 {
+			break
+		}
+		fmt.Fprintf(&b, " %s=%s:%d/%d", r.Disk, r.State, r.Changed, r.Pieces)
+	}
+	fmt.Fprintf(&b, "\nstatus %s\nstarted %d\nupdated %d\n", s.Status, s.Started.UnixMilli(), s.Updated.UnixMilli())
 	fmt.Fprintf(&b, "disk %d\nread %d\ndata %d\nhanded %d\nwritten %d\n", s.Disk, s.Read, s.Data, s.Handed, s.Written)
 	w := 0
 	if s.Writing {
@@ -117,16 +155,25 @@ func (s *State) Encode() []byte {
 	return b.Bytes()
 }
 
-// ErrFormat is returned for a file that is not a state file of this version.
-var ErrFormat = errors.New("blockmap: not a state file of version 1")
+// kind is the run's kind, full when unset.
+func (s *State) kind() string {
+	if s.Kind == "" {
+		return KindFull
+	}
+	return s.Kind
+}
+
+// ErrFormat is returned for a file that is not a state file of version 1 or 2.
+var ErrFormat = errors.New("blockmap: not a state file of version 1 or 2")
 
 // Decode parses a state file.
 func Decode(b []byte) (*State, error) {
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	if !sc.Scan() || sc.Text() != Magic {
+	if !sc.Scan() || sc.Text() != Magic && sc.Text() != MagicV1 {
 		return nil, ErrFormat
 	}
+	v2 := sc.Text() == Magic
 	s := &State{}
 	seen := map[string]bool{}
 	for sc.Scan() {
@@ -154,6 +201,26 @@ func Decode(b []byte) (*State, error) {
 			s.Name = val
 		case "mode":
 			s.Mode = val
+		case "kind":
+			switch val {
+			case KindFull, KindChanges, KindCheck, KindProbe:
+				s.Kind = val
+			default:
+				err = fmt.Errorf("kind %q", val)
+			}
+		case "skipped":
+			s.Skipped = u()
+		case "records":
+			for _, f := range strings.Fields(val) {
+				m := recordRe.FindStringSubmatch(f)
+				if m == nil || len(s.Records) == 16 {
+					err = fmt.Errorf("record %q", f)
+					break
+				}
+				c, _ := strconv.ParseUint(m[3], 10, 64)
+				n, _ := strconv.ParseUint(m[4], 10, 64)
+				s.Records = append(s.Records, Record{m[1], m[2], c, n})
+			}
 		case "status":
 			s.Status = val
 		case "started":
@@ -193,14 +260,20 @@ func Decode(b []byte) (*State, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFormat, err)
 	}
-	for _, k := range []string{"guest", "status", "started", "updated", "disk", "read", "map"} {
+	need := []string{"guest", "status", "started", "updated", "disk", "read", "map"}
+	if v2 {
+		need = append(need, "kind")
+	} else {
+		s.Kind = KindFull
+	}
+	for _, k := range need {
 		if !seen[k] {
 			return nil, fmt.Errorf("%w: no %s line (a file cut short?)", ErrFormat, k)
 		}
 	}
 	for _, c := range s.Map {
-		switch c {
-		case CellUnread, CellEmpty, CellData, CellHanded:
+		switch {
+		case c == CellUnread, c == CellEmpty, c == CellData, c == CellHanded, c == CellKept && v2:
 		default:
 			return nil, fmt.Errorf("%w: map character %q", ErrFormat, c)
 		}

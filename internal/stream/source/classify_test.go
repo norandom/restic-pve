@@ -9,6 +9,7 @@ func TestBenignLinesAreInfo(t *testing.T) {
 		"ERROR: could not notify via target `mail-to-root`: no recipients provided",
 		"ERROR: could not notify via endpoint `mail-to-root`: failed",
 		"ERROR: no recipients provided",
+		`Plugin "PVE::Storage::Custom::ResticPVEPlugin" is implementing an older storage API, an upgrade is recommended`,
 	} {
 		t.Run(line, func(t *testing.T) {
 			c := NewClassifier()
@@ -76,5 +77,13 @@ func TestBackupFailureReasons(t *testing.T) {
 				t.Fatalf("failure = %q, %v", reason, transient)
 			}
 		})
+	}
+}
+
+// The older-API warning of another plug-in stays a warning: only restic-pve's own is known.
+func TestOtherPluginWarningsStay(t *testing.T) {
+	c := NewClassifier()
+	if v := c.Line(`Plugin "PVE::Storage::Custom::OtherPlugin" is implementing an older storage API, an upgrade is recommended`); v.Level == LevelInfo {
+		t.Fatal("another plug-in's warning hidden")
 	}
 }

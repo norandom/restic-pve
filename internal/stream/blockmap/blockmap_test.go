@@ -20,7 +20,7 @@ import (
 )
 
 func TestStateRoundTrip(t *testing.T) {
-	s := &State{VMID: 100, Name: "web", Mode: "full", Status: Running,
+	s := &State{VMID: 100, Name: "web", Mode: "full", Kind: KindFull, Status: Running,
 		Started: time.UnixMilli(1763380000123), Updated: time.UnixMilli(1763380012456),
 		Disk: 34359738368, Read: 1234567, Data: 7654, Handed: 4096, Written: 9999, Writing: true,
 		Reading: []int{17, 18}, Message: "", Map: []byte("??..oo##")}
@@ -45,7 +45,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if n := len(s.Encode()); n > MaxCells+512 {
 		t.Errorf("%d bytes", n)
 	}
-	for _, bad := range []string{"", "vmastream-view 2\n", string(b[:len(b)/2]),
+	for _, bad := range []string{"", "vmastream-view 3\n", "vmastream-view 2\n", string(b[:len(b)/2]),
 		strings.Replace(string(b), "map ??..oo##", "map ??..x", 1), strings.Replace(string(b), "read 1234567", "read -1", 1)} {
 		if _, err := Decode([]byte(bad)); !errors.Is(err, ErrFormat) {
 			t.Errorf("%q: %v", bad, err)
@@ -353,5 +353,33 @@ func TestPublisherFailures(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("a slow disk held the stream for %v", d)
+	}
+}
+
+// Version 2: the cell "=", kind, skipped and the records; a version-1 file still reads, as a
+// full read, and "=" is no cell of version 1.
+func TestStateVersion2(t *testing.T) {
+	s := &State{VMID: 100, Name: "web", Mode: "probe", Kind: KindProbe, Skipped: 52 << 20,
+		Records: []Record{{"drive-efidisk0", "new", 0, 1}, {"drive-scsi0", "reuse", 3, 16}},
+		Status:  Done, Started: time.UnixMilli(1), Updated: time.UnixMilli(2), Disk: 64 << 20, Map: []byte("==?==???")}
+	b := s.Encode()
+	if !strings.HasPrefix(string(b), "vmastream-view 2\nguest 100\nname web\nmode probe\nkind probe\nskipped 54525952\n"+
+		"records drive-efidisk0=new:0/1 drive-scsi0=reuse:3/16\nstatus done\n") {
+		t.Fatalf("%s", b)
+	}
+	got, err := Decode(b)
+	if err != nil || got.Kind != KindProbe || got.Skipped != 52<<20 || len(got.Records) != 2 || got.Records[1] != s.Records[1] || string(got.Map) != "==?==???" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	v1 := "vmastream-view 1\nguest 100\nname web\nmode full\nstatus running\nstarted 1\nupdated 2\ndisk 8\nread 4\ndata 0\nhanded 0\nwritten 0\nwriting 0\nreading\nmessage \nmap ??##\n"
+	if got, err := Decode([]byte(v1)); err != nil || got.Kind != KindFull || string(got.Map) != "??##" {
+		t.Fatalf("version 1: %+v %v", got, err)
+	}
+	for _, bad := range []string{strings.Replace(v1, "map ??##", "map ??==", 1),
+		strings.Replace(string(b), "kind probe", "kind maybe", 1), strings.Replace(string(b), "kind probe\n", "", 1),
+		strings.Replace(string(b), "=reuse:3/16", "=used:3/16", 1), strings.Replace(string(b), "drive-scsi0=", "drive scsi0=", 1)} {
+		if _, err := Decode([]byte(bad)); !errors.Is(err, ErrFormat) {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }

@@ -35,6 +35,10 @@ type Options struct {
 	Idle  time.Duration    // default Idle
 	Now   func() time.Time // default time.Now
 	Ready func()           // tests: called after each drawn frame
+	// Follow: the run in the live file is the one this viewer belongs to (restic-pve pieces
+	// shows its own run): it is shown with its end state even when it ended before the first
+	// frame, and the viewer never closes by itself.
+	Follow bool
 }
 
 // Run shows the view on an initialised screen until q, Q, Esc or Ctrl-C. It only reads the
@@ -110,7 +114,10 @@ func Run(screen tcell.Screen, o Options) error {
 			return
 		}
 		lastKey = key
-		seen := snap.Live != nil && !watched.IsZero() && snap.Live.Started.Equal(watched)
+		seen := snap.Live != nil && (o.Follow || !watched.IsZero() && snap.Live.Started.Equal(watched))
+		if o.Follow {
+			lastActive = now
+		}
 		f := Build(snap, &sp, seen, now, cols, rows, o.Words)
 		switch {
 		case !guestRunning && lc.Running:

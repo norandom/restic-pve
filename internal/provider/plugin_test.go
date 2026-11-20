@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -326,5 +327,47 @@ func TestDriverRefusesBadReplies(t *testing.T) {
 		if out := runDriver(t, s.start(t)); !strings.HasSuffix(out, "guest failed\n") {
 			t.Errorf("%s: driver:\n%s", name, out)
 		}
+	}
+}
+
+// The Go and Perl sides agree on the API window.
+func TestAPIWindowMatchesThePlugin(t *testing.T) {
+	text := string(Plugin)
+	if !strings.Contains(text, "my $APIVER_MIN = "+strconv.Itoa(APIMin)+";") || !strings.Contains(text, "my $APIVER_TESTED = "+strconv.Itoa(APITested)+";") {
+		t.Fatal("APIMin/APITested differ from the plug-in")
+	}
+	if !strings.Contains(text, "sub update_volume_attribute { return }") {
+		t.Fatal("update_volume_attribute must do nothing")
+	}
+}
+
+// The two Perl checks install runs, against the real file and Proxmox's loader (stub): the
+// API and the base class, then "loaded"; and what they say when Proxmox refuses the file.
+func TestProxmoxChecksInPerl(t *testing.T) {
+	root := hostRoot(t)
+	run := func(apiver, script string) string {
+		cmd := exec.Command(testfix.Perl(t), "-I", root, "-I", stubs(t), "-e", script)
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "STUB_APIVER=" + apiver}
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	if out := run("17", apiScript); out != "api 17 8 base 1\n" {
+		t.Fatalf("api: %q", out)
+	}
+	if out := run("17", loadScript); out != "loaded\n" {
+		t.Fatalf("load: %q", out)
+	}
+	if out := run("30", loadScript); !strings.Contains(out, "warn: Error loading storage plugin \"PVE::Storage::Custom::ResticPVEPlugin\": API version too old") ||
+		!strings.HasSuffix(out, "not loaded\n") {
+		t.Fatalf("refused: %q", out)
+	}
+	if out := run("19", loadScript); !strings.Contains(out, "is implementing an older storage API") || !strings.HasSuffix(out, "loaded\n") {
+		t.Fatalf("newer: %q", out)
+	}
+	// vzdump sets notes and protected when site defaults say so: harmless
+	if out := run("17", `require PVE::Storage; my $c = "PVE::Storage::Custom::ResticPVEPlugin"; `+
+		`$c->update_volume_attribute({}, "restic-pve", "backup/x", "protected", 1); `+
+		`$c->update_volume_attribute({}, "restic-pve", "backup/x", "notes", "n"); print "attr ok\n";`); out != "attr ok\n" {
+		t.Fatalf("attributes: %q", out)
 	}
 }

@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
+	"github.com/norandom/restic-pve/internal/provider"
 	"github.com/norandom/restic-pve/internal/wrapper"
 )
 
@@ -68,6 +70,7 @@ type System struct {
 	Term       Terminal                // the terminal on stdin and stdout; nil when there is none
 	Getenv     func(key string) string // TERM and NO_COLOR; nil means both unset
 	Plain      bool                    // install --plain: ask line by line even on a terminal
+	Hostname   func() (string, error)  // the node name for the storage entry; nil: os.Hostname
 }
 
 // Default returns the production system.
@@ -88,6 +91,7 @@ func Default(version, executable string) *System {
 		Stderr:     os.Stderr,
 		Term:       newTTY(),
 		Getenv:     os.Getenv,
+		Hostname:   os.Hostname,
 	}
 }
 
@@ -111,6 +115,19 @@ func (s *System) Install() int {
 		fmt.Fprintf(s.Stderr, "restic-pve: %v; nothing changed\n", err)
 		return 1
 	}
+	if v.Changes && s.changesPending(v) {
+		// cluster, Proxmox version, foreign items: refused before anything changes
+		if _, err := s.provider().CanEnable(); err != nil {
+			fmt.Fprintf(s.Stderr, "restic-pve: changed reads: %v; nothing changed\n", err)
+			return 1
+		}
+	}
+	release, err := s.changesLock(v)
+	if err != nil {
+		fmt.Fprintf(s.Stderr, "restic-pve: %v; nothing changed\n", err)
+		return 1
+	}
+	defer release()
 	if err := s.install(v); err != nil {
 		fmt.Fprintf(s.Stderr, "restic-pve: install failed: %v\n", err)
 		return 1
@@ -211,7 +228,63 @@ func (s *System) install(v *Values) error {
 			s.report("removed", p)
 		}
 	}
-	return nil
+	return s.changedReads(v)
+}
+
+// provider is the host as the plug-in code sees it, with this install's root and commands.
+func (s *System) provider() *provider.Host {
+	return &provider.Host{Root: s.Root, Run: s.Run, Chown: s.Chown, Report: s.report}
+}
+
+// changesPending reports whether the changed-reads step would change anything on the host.
+func (s *System) changesPending(v *Values) bool {
+	h := s.provider()
+	st, _ := h.PluginState()
+	typ, _ := h.StorageEntry()
+	_, runErr := os.Lstat(s.path(provider.RunDir))
+	if v.Changes {
+		return st != provider.Current || typ != provider.StorageType
+	}
+	return st == provider.Current || st == provider.Different || typ == provider.StorageType || runErr == nil
+}
+
+// changesLock takes the host-wide lock when the changed-reads step will change something, so
+// the plug-in and the storage entry never change under a running backup. Busy: nothing changes.
+func (s *System) changesLock(v *Values) (release func(), err error) {
+	if !s.changesPending(v) {
+		return func() {}, nil
+	}
+	lock, err := os.OpenFile(s.path(lockFile), os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", lockFile, err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, errStop("a backup is running on this host (" + lockFile + " is held); run restic-pve install again when it has finished")
+	}
+	return func() { lock.Close() }, nil
+}
+
+// changedReads adds (yes) or removes (no) the plug-in file and the storage entry.
+func (s *System) changedReads(v *Values) error {
+	h := s.provider()
+	if !v.Changes {
+		if !s.changesPending(v) {
+			s.report("off", "changed reads (no plug-in, no storage entry)")
+			return nil
+		}
+		return h.Disable()
+	}
+	hostname := s.Hostname
+	if hostname == nil {
+		hostname = os.Hostname
+	}
+	name, err := hostname()
+	if err != nil {
+		return fmt.Errorf("node name: %w", err)
+	}
+	node, _, _ := strings.Cut(name, ".")
+	return h.Enable(node)
 }
 
 // binary puts the running executable at Binary (owner root, mode 0755). When it already

@@ -1,10 +1,13 @@
 // Package wrapper answers the forced-command requests of the backup identity on a
-// Proxmox VE host: ping, info <vmid> and dump <vmid>. It is a port of the bash wrapper
-// restic-vzdump with the same grammar, checks, output and exit codes. The allow list
-// is the VMIDS key of the one settings file /etc/restic-pve.conf.
+// Proxmox VE host: ping, info <vmid>, dump <vmid> and changes <vmid> probe|use|new. ping,
+// info and dump are a port of the bash wrapper restic-vzdump with the same grammar, checks,
+// output and exit codes. The allow list is the VMIDS key of the one settings file
+// /etc/restic-pve.conf.
 //
 // The wrapper never writes guest or storage state. It runs no qm write operations,
-// snapshots or storage write commands.
+// snapshots or storage write commands. The only files it writes are the lock, the job socket
+// of a changes request and, under the lock, the plug-in file from the binary's own copy when
+// another version of it is installed.
 package wrapper
 
 import (
@@ -36,6 +39,14 @@ type Env struct {
 	AgentTimeout       time.Duration
 	Version            string
 	Stdout, Stderr     *os.File // vzdump gets these descriptors directly
+	Stdin              *os.File // the ack line of a changes request
+
+	Root         string        // prefix of the plug-in file, the storage configuration and the job folder ("" in production)
+	QemuRun      string        // where qemu-server opens the NBD socket of a backup job
+	Proc         string        // the proc file system, for the job socket's peer check
+	CallTimeout  time.Duration // the longest wait for the plug-in's next call
+	AckTimeout   time.Duration // the longest wait for the ack line after the stream: AckLimit
+	StallTimeout time.Duration // the longest a write to stdout may make no progress: StallLimit
 }
 
 // Default returns the production environment.
@@ -49,6 +60,12 @@ func Default(version string) *Env {
 		Version:      version,
 		Stdout:       os.Stdout,
 		Stderr:       os.Stderr,
+		Stdin:        os.Stdin,
+		QemuRun:      "/run/qemu-server",
+		Proc:         "/proc",
+		CallTimeout:  time.Hour,
+		AckTimeout:   AckLimit,
+		StallTimeout: StallLimit,
 	}
 }
 
@@ -111,6 +128,22 @@ func (e *Env) request(args []string) (int, error) {
 			return 0, e.info(vmid, conf)
 		}
 		return e.dump(vmid, conf)
+	case "changes":
+		if len(args) != 3 || !changesModes[args[2]] {
+			return 0, refuse("usage: changes <vmid> probe|use|new")
+		}
+		vmid := args[1]
+		if !ValidVMID(vmid) {
+			return 0, refuse("invalid vmid")
+		}
+		conf, err := e.loadConf()
+		if err != nil {
+			return 0, err
+		}
+		if !conf.Allowed(vmid) {
+			return 0, refuse("VM " + vmid + " is not on the allow list")
+		}
+		return e.changes(vmid, args[2], conf)
 	}
 	return 0, refuse("unknown request")
 }

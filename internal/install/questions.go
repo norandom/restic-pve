@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"unicode"
 
+	"github.com/norandom/restic-pve/internal/provider"
 	"github.com/norandom/restic-pve/internal/wrapper"
 )
 
@@ -30,6 +31,7 @@ type Values struct {
 	AbortFreeGiB       int
 	BwlimitKiB         int
 	MaxWorkers         int
+	Changes            bool // changed reads: the Proxmox plug-in and the storage entry restic-pve
 }
 
 var (
@@ -200,14 +202,23 @@ func (a *asker) ask(prompt, def string, check func(string) error) error {
 }
 
 // yes asks a [y/N] question.
-func (a *asker) yes(prompt string) (bool, error) {
-	var ok bool
-	err := a.ask(prompt+" [y/N]", "", func(s string) error {
+func (a *asker) yes(prompt string) (bool, error) { return a.yesDefault(prompt, false) }
+
+// yesDefault asks a yes/no question; Enter takes def ([Y/n] or [y/N]).
+func (a *asker) yesDefault(prompt string, def bool) (bool, error) {
+	ok := def
+	hint := " [y/N]"
+	if def {
+		hint = " [Y/n]"
+	}
+	err := a.ask(prompt+hint, "", func(s string) error {
 		switch strings.ToLower(s) {
 		case "y", "yes":
 			ok = true
-		case "", "n", "no":
+		case "n", "no":
 			ok = false
+		case "":
+			ok = def
 		default:
 			return errors.New("answer y or n")
 		}
@@ -246,7 +257,8 @@ func (s *System) storages() ([]storage, error) {
 	var st []storage
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		if len(f) < 6 || f[2] != "active" || wrapper.CheckConfValue("FLEECING_STORAGE", f[0]) != nil {
+		// restic-pve's own storage holds no images, so it is no fleecing storage
+		if len(f) < 6 || f[2] != "active" || f[0] == provider.StorageID || wrapper.CheckConfValue("FLEECING_STORAGE", f[0]) != nil {
 			continue
 		}
 		kib, _ := strconv.ParseInt(f[5], 10, 64) // pvesm reports KiB
@@ -259,7 +271,7 @@ func (s *System) storages() ([]storage, error) {
 // entry (else DefaultUser), address and key from its authorized_keys, the rest from
 // /etc/restic-pve.conf (else the built-in limits). Anything unreadable is no default.
 func (s *System) current() *Values {
-	v := &Values{User: s.sudoersUser(), MinFreeGiB: 32, AbortFreeGiB: 8, BwlimitKiB: 40960, MaxWorkers: 1}
+	v := &Values{User: s.sudoersUser(), MinFreeGiB: 32, AbortFreeGiB: 8, BwlimitKiB: 40960, MaxWorkers: 1, Changes: s.changesOn()}
 	if v.User == "" {
 		v.User = DefaultUser
 	}
@@ -289,6 +301,15 @@ func (s *System) current() *Values {
 	v.BwlimitKiB, _ = strconv.Atoi(c.BwlimitKiB)
 	v.MaxWorkers, _ = strconv.Atoi(c.MaxWorkers)
 	return v
+}
+
+// changesOn reports whether changed reads are on now: the plug-in file is ours or the storage
+// entry is there. A reinstall keeps that choice as its default.
+func (s *System) changesOn() bool {
+	h := s.provider()
+	st, _ := h.PluginState()
+	typ, _ := h.StorageEntry()
+	return st == provider.Current || st == provider.Different || typ == provider.StorageType
 }
 
 // questions asks for the site values; defaults are the values of an existing install.
@@ -339,10 +360,35 @@ func (s *System) questions(def *Values, gs []guest, sts []storage) (*Values, err
 
 	fmt.Fprintln(s.Stdout, "\nLimits: "+def.limits())
 	change, err := a.yes("Change the limits?")
-	if err != nil || !change {
-		return &v, err
+	if err != nil {
+		return nil, err
 	}
-	return &v, s.limitQuestions(a, def, &v)
+	if change {
+		if err := s.limitQuestions(a, def, &v); err != nil {
+			return nil, err
+		}
+	}
+	fmt.Fprintln(s.Stdout, "\nChanged reads (optional). "+changesText)
+	v.Changes, err = a.yesDefault("Read only the changed parts of running guests?", def.Changes)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// changesText is the explanation of the changed-reads question: what is added, why, and how
+// to remove it. The form and the plain questions show the same text.
+const changesText = "Yes adds two things to this host: the file " + provider.PluginPath +
+	" and the storage " + provider.StorageID + ", which the Proxmox screens show as a backup target that " +
+	"refuses jobs started there. Proxmox hands its record of changed blocks only to such a plug-in; with it " +
+	"a backup of a running guest reads only what changed since the last one. Answer no here, or run " +
+	"restic-pve uninstall, and both are removed again."
+
+func (v *Values) changesLine() string {
+	if v.Changes {
+		return "on: plug-in " + provider.PluginPath + ", storage " + provider.StorageID
+	}
+	return "off (no plug-in, no storage entry)"
 }
 
 func (s *System) limitQuestions(a *asker, def, v *Values) error {
@@ -374,6 +420,7 @@ func (s *System) summary(v *Values) {
 		"  binary            %s\n"+
 		"  settings          %s: guests %s, fleecing storage %s,\n"+
 		"                    %s\n"+
-		"  update timer      %s: restic-pve update daily (always on)\n",
-		v.User, loginShell, v.From, v.Pubkey, sudoers, Binary, confFile, v.vmidList(" "), v.Storage, v.limits(), timerName)
+		"  update timer      %s: restic-pve update daily (always on)\n"+
+		"  changed reads     %s\n",
+		v.User, loginShell, v.From, v.Pubkey, sudoers, Binary, confFile, v.vmidList(" "), v.Storage, v.limits(), timerName, v.changesLine())
 }

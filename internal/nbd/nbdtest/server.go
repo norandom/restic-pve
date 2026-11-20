@@ -137,12 +137,43 @@ func put(w io.Writer, parts ...any) error {
 	return nil
 }
 
-func (s *Server) optReply(c net.Conn, opt, typ uint32, data []byte) error {
+func optReply(c net.Conn, opt, typ uint32, data []byte) error {
 	return put(c, uint64(repMagic), opt, typ, uint32(len(data)), data)
 }
 
 // Serve runs one session on c until the client disconnects or a fault ends it.
 func (s *Server) Serve(c net.Conn) error {
+	return serve(c, s.Fault == FaultNoStructured, func(name string) *Server {
+		if name == s.Export {
+			return s
+		}
+		return nil
+	})
+}
+
+// Exports serves several exports on one socket, chosen by name, as QEMU serves the devices
+// of one backup job.
+type Exports []*Server
+
+// Serve runs one session on c.
+func (x Exports) Serve(c net.Conn) error {
+	noStructured := false
+	for _, s := range x {
+		noStructured = noStructured || s.Fault == FaultNoStructured
+	}
+	return serve(c, noStructured, func(name string) *Server {
+		for _, s := range x {
+			if s.Export == name {
+				return s
+			}
+		}
+		return nil
+	})
+}
+
+// serve runs the handshake (the option phase knows no export yet, so noStructured stands for
+// all of them), then the transmission phase of the export the client chose.
+func serve(c net.Conn, noStructured bool, pick func(string) *Server) error {
 	if err := put(c, []byte("NBDMAGIC"), []byte("IHAVEOPT"), uint16(3)); err != nil {
 		return err
 	}
@@ -153,7 +184,6 @@ func (s *Server) Serve(c net.Conn) error {
 	if cf&1 == 0 {
 		return errors.New("client is not fixed newstyle")
 	}
-	ctx := "qemu:dirty-bitmap:" + s.Bitmap
 	structured := false
 	for {
 		var h struct {
@@ -172,26 +202,27 @@ func (s *Server) Serve(c net.Conn) error {
 		}
 		switch h.Opt {
 		case 8: // structured reply
-			if s.Fault == FaultNoStructured {
-				s.optReply(c, h.Opt, 1<<31+1, []byte("no"))
+			if noStructured {
+				optReply(c, h.Opt, 1<<31+1, []byte("no"))
 				continue
 			}
 			structured = true
-			s.optReply(c, h.Opt, 1, nil)
+			optReply(c, h.Opt, 1, nil)
 		case 10: // set meta context
 			nl := be.Uint32(data)
 			name := string(data[4 : 4+nl])
 			q := data[4+nl+4:]
 			ql := be.Uint32(q)
 			query := string(q[4 : 4+ql])
-			if name == s.Export && query == ctx && s.Fault != FaultNoMetaContext {
-				s.optReply(c, h.Opt, 4, append(be.AppendUint32(nil, 7), ctx...))
+			if s := pick(name); s != nil && query == "qemu:dirty-bitmap:"+s.Bitmap && s.Fault != FaultNoMetaContext {
+				optReply(c, h.Opt, 4, append(be.AppendUint32(nil, 7), query...))
 			}
-			s.optReply(c, h.Opt, 1, nil)
+			optReply(c, h.Opt, 1, nil)
 		case 7: // go
 			nl := be.Uint32(data)
-			if string(data[4:4+nl]) != s.Export {
-				s.optReply(c, h.Opt, 1<<31+6, []byte("unknown export"))
+			s := pick(string(data[4 : 4+nl]))
+			if s == nil {
+				optReply(c, h.Opt, 1<<31+6, []byte("unknown export"))
 				continue
 			}
 			if s.Fault == FaultHugeOptionReply {
@@ -199,15 +230,15 @@ func (s *Server) Serve(c net.Conn) error {
 				return nil
 			}
 			// export info: size, flags HAS_FLAGS|SEND_FLUSH|SEND_TRIM|SEND_WRITE_ZEROES (writable, as QEMU's)
-			s.optReply(c, h.Opt, 3, be.AppendUint16(be.AppendUint64(be.AppendUint16(nil, 0), s.size()), 1|4|32|64))
-			s.optReply(c, h.Opt, 3, be.AppendUint32(be.AppendUint32(be.AppendUint32(be.AppendUint16(nil, 3), 512), 4096), 32<<20))
-			s.optReply(c, h.Opt, 1, nil)
+			optReply(c, h.Opt, 3, be.AppendUint16(be.AppendUint64(be.AppendUint16(nil, 0), s.size()), 1|4|32|64))
+			optReply(c, h.Opt, 3, be.AppendUint32(be.AppendUint32(be.AppendUint32(be.AppendUint16(nil, 3), 512), 4096), 32<<20))
+			optReply(c, h.Opt, 1, nil)
 			if s.Fault == FaultDropAfterGo {
 				return nil
 			}
 			return s.transmission(c, structured)
 		default:
-			s.optReply(c, h.Opt, 1<<31+1, nil)
+			optReply(c, h.Opt, 1<<31+1, nil)
 		}
 	}
 }

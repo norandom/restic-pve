@@ -5,7 +5,8 @@
 //
 // Host role:
 //
-//	restic-pve request <ping|info <vmid>|dump <vmid>>   forced command (through sudo)
+//	restic-pve request <ping|info <vmid>|dump <vmid>|changes <vmid> probe|use|new>
+//	                                                    forced command (through sudo)
 //	restic-pve install [--plain]                        root: asks for the site values, installs or changes the identity
 //	restic-pve update                                   root: replace itself with the latest signed release
 //	restic-pve uninstall                                root: remove the identity, its files and the binary
@@ -17,12 +18,15 @@
 //	restic-pve space [--plain|--check]                  storage space; --check: one line, exit 0 ok, 1 low, 2 unknown
 //	restic-pve watch [--once]                           the backup that runs now: guest block view or local progress
 //	restic-pve stream <backup|verify|to-vma|to-raw> ... the stream program (the former vmastream)
+//	restic-pve pieces --job FILE                        one guest run in the piece layout (this release: the probe)
 //
 // Both:
 //
 //	restic-pve version                                  print the version (stdout); the role on stderr, only on a terminal
 //
-// Not in the usage line: restic-pve demo [pack] [full|incremental] shows the block map of the
+// Not in the usage line: restic-pve host-sync (host role, root), which update runs with the new
+// binary after the rename to bring the Proxmox plug-in to the new binary's copy. And
+// restic-pve demo [pack] [full|incremental] shows the block map of the
 // backup view with a simulated run, to judge the retro look; it reads no data. Without "pack"
 // blocks turn yellow in place; with "pack" they are moved into one solid run at the top, like
 // the reference defragmenter.
@@ -53,16 +57,16 @@ var (
 )
 
 const (
-	hostUsage   = "usage: restic-pve request <ping|info <vmid>|dump <vmid>> | install [--plain] | update | uninstall | version"
+	hostUsage   = "usage: restic-pve request <ping|info <vmid>|dump <vmid>|changes <vmid> probe|use|new> | install [--plain] | update | uninstall | version"
 	backupUsage = "usage: restic-pve status [--plain] | keys [--plain] | space [--plain|--check] | watch [--once] | " +
-		"stream <backup|verify|to-vma|to-raw> [flags] | version"
+		"stream <backup|verify|to-vma|to-raw> [flags] | pieces --job FILE | version"
 )
 
 // roles is the command table: the role of each command. A command not listed (version, demo)
 // runs on both machines.
 var roles = map[string]role.Role{
-	"request": role.Host, "install": role.Host, "update": role.Host, "uninstall": role.Host,
-	"stream": role.Backup, "watch": role.Backup, "status": role.Backup, "keys": role.Backup, "space": role.Backup,
+	"request": role.Host, "install": role.Host, "update": role.Host, "uninstall": role.Host, "host-sync": role.Host,
+	"stream": role.Backup, "pieces": role.Backup, "watch": role.Backup, "status": role.Backup, "keys": role.Backup, "space": role.Backup,
 }
 
 // env is what a command sees of the machine.
@@ -105,6 +109,8 @@ func run(args []string, e env) int {
 		return cmdStream(args[1:], e)
 	case args[0] == "watch":
 		return cmdWatch(args[1:], e)
+	case args[0] == "pieces":
+		return cmdPieces(args[1:], e)
 	case args[0] == "status":
 		return cmdStatus(args[1:], e)
 	case args[0] == "keys":
@@ -138,6 +144,12 @@ func run(args []string, e env) int {
 			return 1
 		}
 		return 0
+	case args[0] == "host-sync" && len(args) == 1:
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(stderr, "restic-pve: host-sync must run as root")
+			return 1
+		}
+		return wrapper.Default(version).HostSync()
 	case args[0] == "uninstall" && len(args) == 1:
 		return install.Default(version, "").Uninstall()
 	case args[0] == "update" && len(args) == 1:
@@ -149,7 +161,7 @@ func run(args []string, e env) int {
 		return update.Run(update.Config{
 			BaseURL: update.BaseURL(releaseRepo), Target: exe, CurrentVersion: version,
 			Keys: relkeys.PublicKeys, Arch: runtime.GOARCH, HTTPClient: update.Client(),
-			IsRoot: func() bool { return os.Geteuid() == 0 }, Stdout: stdout, Stderr: stderr,
+			IsRoot: func() bool { return os.Geteuid() == 0 }, Stdout: stdout, Stderr: stderr, HostSync: true,
 		})
 	}
 	fmt.Fprintln(stderr, usage)

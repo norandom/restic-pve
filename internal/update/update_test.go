@@ -168,3 +168,31 @@ func TestParseSums(t *testing.T) {
 		t.Fatal(m, err)
 	}
 }
+
+// After the rename, the new binary's host-sync runs and its lines are passed on; a failing
+// sync does not fail the update; nothing is synced when nothing was replaced.
+func TestUpdateRunsHostSync(t *testing.T) {
+	for _, c := range []struct {
+		script, stdout, stderr string
+	}{
+		{`[ "$1" = host-sync ] && { echo "written   /usr/share/perl5/PVE/Storage/Custom/ResticPVEPlugin.pm"; exit 0; }`,
+			"restic-pve updated from v1.2.0 to v1.3.0\nwritten   /usr/share/perl5/PVE/Storage/Custom/ResticPVEPlugin.pm\n", ""},
+		{`[ "$1" = host-sync ] && { echo "restic-pve: host-sync: a backup is running; the next backup brings the plug-in up to date"; exit 0; }`,
+			"restic-pve updated from v1.2.0 to v1.3.0\nrestic-pve: host-sync: a backup is running; the next backup brings the plug-in up to date\n", ""},
+		{`[ "$1" = host-sync ] && { echo "restic-pve: host-sync: plug-in not written"; exit 1; }`,
+			"restic-pve updated from v1.2.0 to v1.3.0\nrestic-pve: host-sync: plug-in not written\n",
+			"restic-pve: plug-in sync after the update did not finish (exit status 1); the next backup brings the plug-in up to date\n"},
+	} {
+		r := newRelease(t, "v1.3.0", "v1.3.0")
+		r.files["restic-pve-linux-amd64"] = []byte("#!/bin/sh\n" + c.script + "\necho v1.3.0\n")
+		r.sign()
+		o := r.run(t, func(cf *Config) { cf.HostSync = true })
+		if o.code != 0 || o.stdout != c.stdout || o.stderr != c.stderr {
+			t.Errorf("%q: %+v", c.script, o)
+		}
+	}
+	o := newRelease(t, "v1.2.0", "v1.2.0").run(t, func(cf *Config) { cf.HostSync = true })
+	if o.code != 0 || o.stdout != "restic-pve v1.2.0 is up to date\n" {
+		t.Fatalf("up to date: %+v", o)
+	}
+}

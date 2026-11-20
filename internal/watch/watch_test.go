@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -358,3 +359,67 @@ func TestWordsFromTheMachine(t *testing.T) {
 		}
 	}
 }
+
+// Format 2, a changed-blocks run: the unchanged cells ("=") are in the backup at once and
+// join the yellow run; the changed ones go "?" to "o" to "#".
+func TestChangedBlocksMap(t *testing.T) {
+	s := state()
+	s.Kind, s.Mode = blockmap.KindChanges, "changes"
+	s.Map = bytes.Repeat([]byte{blockmap.CellKept}, 1320)
+	s.Map[10], s.Map[700], s.Map[701] = blockmap.CellHanded, blockmap.CellData, blockmap.CellUnread
+	in := Input(s, nil)
+	if in.Run() != 1318 {
+		t.Fatalf("run %d: kept and handed cells are in the backup", in.Run())
+	}
+	l := draw(t, Snapshot{Live: s}, true, s.Updated)
+	n := mapCells(l)
+	if n['◘'] != 1318 || n['W'] != 1 { // the run: kept and handed cells; W where data goes in now
+		t.Fatalf("map %v", n)
+	}
+}
+
+// Format 2, a probe: the record in place, the count of changed blocks, and plain words that
+// nothing is read or stored.
+func TestProbeView(t *testing.T) {
+	m := bytes.Repeat([]byte{blockmap.CellKept}, 16+1)
+	m[0], m[4], m[5] = blockmap.CellUnread, blockmap.CellUnread, blockmap.CellUnread
+	s := &blockmap.State{VMID: 100, Name: "web", Mode: "probe", Kind: blockmap.KindProbe, Status: blockmap.Done,
+		Started: t0, Updated: t0.Add(3 * time.Second), Disk: 64<<20 + 540672, Skipped: 13 * 4 << 20,
+		Records: []blockmap.Record{{Disk: "drive-efidisk0", State: "reuse", Pieces: 1}, {Disk: "drive-scsi0", State: "reuse", Changed: 3, Pieces: 16}}, Map: m}
+	l := draw(t, Snapshot{Live: s}, true, s.Updated)
+	want(t, l, "Guest 100 (web) · probe · record reuse · 65 MiB disk", "q=Leave view", "To read 3", "17%", "Probe: nothing read or stored",
+		"◘ - To read", "░ - Unchanged", "Probe done: 3 of 17 pieces (4 MiB each) changed; nothing read or stored")
+	// in place: changed blocks where they are on the disk
+	if r := []rune(l[1]); r[1] != '◘' || r[2] != '░' || r[5] != '◘' || r[6] != '◘' || r[7] != '░' {
+		t.Fatalf("map row %q", l[1])
+	}
+	if got := Line(Snapshot{Live: s}, s.Updated, "x"); got != "probe of guest 100 (web): drive-efidisk0 record reuse, 0 of 1 pieces of 4 MiB changed (0 KiB); "+
+		"drive-scsi0 record reuse, 3 of 16 pieces of 4 MiB changed (12 MiB); nothing was read or stored" {
+		t.Fatalf("line %q", got)
+	}
+	// a disk without a record: all of it is read by the next run
+	s.Records[1].State, s.Map = "new", bytes.Repeat([]byte{blockmap.CellUnread}, 17)
+	s.Map[0] = blockmap.CellKept
+	l = draw(t, Snapshot{Live: s}, true, s.Updated)
+	want(t, l, "· probe · record new ·", "To read 16", "94%", "Probe done: record new, the next run reads in full; nothing read or stored")
+	if got := Line(Snapshot{Live: s}, s.Updated, "x"); !strings.Contains(got, "drive-scsi0 record new: no record yet, the next run reads it in full") {
+		t.Fatal(got)
+	}
+	s.Status = blockmap.Running
+	if got := Line(Snapshot{Live: s}, s.Updated, "x"); !strings.Contains(got, "nothing is read or stored") {
+		t.Fatal(got)
+	}
+}
+
+// A file of format 1 (an older release on the backup machine) still draws.
+func TestVersion1FileStillDraws(t *testing.T) {
+	v1 := "vmastream-view 1\nguest 100\nname web\nmode full\nstatus running\nstarted " + itoa(t0.UnixMilli()) + "\nupdated " +
+		itoa(t0.Add(time.Second).UnixMilli()) + "\ndisk 17179869184\nread 4294967296\ndata 0\nhanded 0\nwritten 0\nwriting 0\nreading 3\nmessage \nmap ##..??????\n"
+	s, err := blockmap.Decode([]byte(v1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, draw(t, Snapshot{Live: s}, true, t0.Add(time.Second)), "Guest 100 (web) · full backup · 16.0 GiB disk", "Full backup")
+}
+
+func itoa(v int64) string { return strconv.FormatInt(v, 10) }

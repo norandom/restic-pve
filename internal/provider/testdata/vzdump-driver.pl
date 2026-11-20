@@ -5,10 +5,16 @@
 # (git.proxmox.com, master of 2026-11-20); see docs/reference/provider-plugin.md.
 #
 #   perl -I <root> -I <stubs> vzdump-driver.pl load <root>
-#   perl -I <root> -I <stubs> vzdump-driver.pl job <root> <socket> <vmid>
+#   perl -I <root> -I <stubs> vzdump-driver.pl job <root> <socket> <vmid> [<spec.json> <nbd dir>]
 #
 # Output: one line per event ("call <method>", "log <level> <message>", "result ..."), then
 # "job ok, guest ok|failed" or "job failed: <error>".
+#
+# With a spec file (the format of internal/nbd/nbdtest Spec) the disks, the guest config and
+# the record state come from it: a disk asked with "use" is reported "reuse" when the spec
+# says QEMU has a record for it, else "new"; the NBD socket is <nbd dir>/<vmid>-nbd.backup-access
+# as qemu-server names it. With "exit_status" the driver exits 2 when the guest or the job
+# failed, as vzdump does.
 use strict;
 use warnings;
 no warnings 'once';
@@ -16,9 +22,17 @@ no warnings 'once';
 use PVE::Storage;
 use PVE::Storage::Plugin;
 use PVE::BackupProvider::Plugin::Base;
+use JSON::PP;
 
 $| = 1;
-my ($what, $root, $socket, $vmid) = @ARGV;
+my ($what, $root, $socket, $vmid, $specfile, $nbddir) = @ARGV;
+my $spec;
+if (defined $specfile) {
+    open(my $fh, '<', $specfile) or die "spec: $!\n";
+    local $/;
+    $spec = JSON::PP->new->decode(<$fh>);
+    close($fh);
+}
 my $file = 'PVE/Storage/Custom/ResticPVEPlugin.pm';
 my $modname = 'PVE::Storage::Custom::ResticPVEPlugin';
 
@@ -81,6 +95,13 @@ sub task {
         print "result mechanism $mech\n";
 
         my $devices = { 'drive-scsi0' => { size => 20 * 1024**3 }, 'drive-efidisk0' => { size => 540672 } };
+        my %record = map { $_ => 1 } keys %$devices;
+        my %report; # a bitmap mode Proxmox reports whatever was asked (e.g. "none": no bitmap support)
+        if ($spec) {
+            $devices = { map { $_->{name} => { size => $_->{size} } } @{ $spec->{devices} } };
+            %record = map { $_->{name} => ($_->{record} ? 1 : 0) } @{ $spec->{devices} };
+            %report = map { $_->{bitmap} ? ($_->{name} => $_->{bitmap}) : () } @{ $spec->{devices} };
+        }
         print "call backup_vm_query_incremental\n";
         my $inc = $p->backup_vm_query_incremental($vmid, $devices);
         for my $d (sort keys %$devices) {
@@ -93,16 +114,23 @@ sub task {
 
         my $volumes = {};
         for my $d (sort keys %$devices) {
+            my $mode = $inc->{$d} // 'none';
             $volumes->{$d} = {
-                'bitmap-mode' => ($inc->{$d} // '') eq 'use' ? 'reuse' : 'new',
+                'bitmap-mode' => $report{$d} // ($mode eq 'use' ? ($record{$d} ? 'reuse' : 'new') : $mode eq 'new' ? 'new' : 'none'),
                 size => $devices->{$d}->{size},
-                'nbd-path' => "/run/qemu-server/$vmid.backup-access.4242//$vmid-nbd.backup-access",
+                'nbd-path' => (defined $nbddir ? "$nbddir//$vmid-nbd.backup-access" : "/run/qemu-server/$vmid.backup-access.4242//$vmid-nbd.backup-access"),
                 'bitmap-name' => 'snapshot-access:restic-pve',
             };
         }
         my $config = "boot: order=scsi0\ncores: 2\nname: web\nscsi0: local:$vmid/vm-$vmid-disk-0.raw,size=20G\n";
+        my $info = { 'bandwidth-limit' => 40960 * 1024, 'firewall-config' => "[OPTIONS]\nenable: 1\n" };
+        if ($spec) {
+            $config = $spec->{config} // $config;
+            delete $info->{'firewall-config'};
+            $info->{'firewall-config'} = $spec->{firewall} if defined $spec->{firewall};
+        }
         print "call backup_vm\n";
-        $p->backup_vm($vmid, $config, $volumes, { 'bandwidth-limit' => 40960 * 1024, 'firewall-config' => "[OPTIONS]\nenable: 1\n" });
+        $p->backup_vm($vmid, $config, $volumes, $info);
 
         print "call backup_cleanup success\n";
         my $res = $p->backup_cleanup($vmid, 'qemu', 1, {});
@@ -136,6 +164,7 @@ if (!$ok) {
     eval { $p->job_cleanup() };
     $err .= "job cleanup for external provider failed - $@" if $@;
     print "job failed: $err";
-    exit 0;
+    exit($spec && $spec->{exit_status} ? 2 : 0);
 }
 print "job ok, guest " . ($guest ? "ok" : "failed") . "\n";
+exit($spec && $spec->{exit_status} && !$guest ? 2 : 0);

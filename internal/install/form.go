@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/norandom/restic-pve/internal/provider"
 	"github.com/norandom/restic-pve/retro"
 	"github.com/rivo/tview"
 )
@@ -145,17 +146,18 @@ func pasteKeys(text string) []keyIn {
 	return ks
 }
 
-// The steps of the form; the summary is not counted in "step n of 5".
+// The steps of the form; the summary is not counted in "step n of 6".
 const (
 	stepFrom = iota
 	stepKey
 	stepGuests
 	stepStorage
 	stepLimits
+	stepChanges
 	stepSummary
 )
 
-var stepTitles = []string{"Backup machine address", "Public key", "Guests", "Fleecing storage", "Limits"}
+var stepTitles = []string{"Backup machine address", "Public key", "Guests", "Fleecing storage", "Limits", "Changed reads"}
 
 var stepTexts = []string{
 	"Type the IP address of the backup machine: the machine that runs the backups and keeps them. " +
@@ -167,16 +169,21 @@ var stepTexts = []string{
 	"Choose where this host keeps temporary data while a running guest is read, so the guest " +
 		"is not slowed down (fleecing). The usual choice is the one with the most free space on fast disks.",
 	"These limits protect this host while a backup runs. The current values suit most hosts.",
+	"Optional. " + changesText,
 }
 
 const summaryText = "Install writes these values, a backup user with its key, a sudoers file, " +
 	"the binary and a daily update timer. Nothing changes before you choose Install."
+
+// The two answers of the changed-reads step; the cursor starts on the current choice.
+var changesChoices = []string{"No: read every guest in full (nothing added)", "Yes: add the plug-in and the storage entry"}
 
 // The short help in the Help box, per step.
 const (
 	helpFrom    = "Example: " + exampleFrom
 	helpKey     = "Example: ssh-ed25519 AAAA... and an optional comment, all on one line."
 	helpLimits  = "Keep: the values above stay. Change: edit them one by one."
+	helpChanges = "No keeps this host as it is, and removes both items if they are there."
 	helpSummary = "Install starts. Back returns to the limits. Cancel changes nothing."
 )
 
@@ -219,6 +226,7 @@ type form struct {
 	sCur      int
 	sTop      int
 	limCur    int // 0 keep, 1 change
+	chCur     int // 0 no, 1 yes
 	editing   bool
 	lim       []string
 	field     int
@@ -234,6 +242,9 @@ type form struct {
 func newForm(def *Values, gs []guest, sts []storage) *form {
 	f := &form{v: *def, gs: gs, sts: sts, stopFn: func() {},
 		onHost: map[int]bool{}, active: map[string]bool{}, from: def.From, key: def.Pubkey}
+	if def.Changes {
+		f.chCur = 1
+	}
 	for _, g := range gs {
 		n, _ := strconv.Atoi(g.vmid)
 		f.onHost[n] = true
@@ -344,6 +355,13 @@ func (f *form) handle(k keyIn) (bool, error) {
 		}
 	case stepLimits:
 		f.limitKey(k)
+	case stepChanges:
+		switch k.kind {
+		case kUp, kDown, kRune:
+			f.chCur = move(f.chCur, len(changesChoices), k)
+		case kEnter:
+			f.ok(nil, func() { f.v.Changes = f.chCur == 1 })
+		}
 	case stepSummary:
 		switch k.kind {
 		case kLeft:
@@ -603,6 +621,11 @@ func (f *form) draw(screen tcell.Screen) {
 			footer, help = footerFields, limitFields[f.field].help
 		}
 		f.drawLimits(b)
+	case stepChanges:
+		help = helpChanges
+		for i, c := range changesChoices {
+			f.row(b, i == f.chCur, c)
+		}
 	case stepSummary:
 		footer = footerSummary
 		f.drawSummary(b)
@@ -828,6 +851,11 @@ func (f *form) drawSummary(b *body) {
 	row("", fmt.Sprintf("stop below %d GiB free", f.v.AbortFreeGiB))
 	row("", fmt.Sprintf("read %s MiB/s, %d at a time", mib(f.v.BwlimitKiB), f.v.MaxWorkers))
 	row("Backup user", f.v.User)
+	changes := "off"
+	if f.v.Changes {
+		changes = "on: plug-in and storage " + provider.StorageID
+	}
+	row("Changed reads", changes)
 	// a blank line and the buttons always show; a summary longer than the box is cut short
 	avail := b.bodyHeight - 2
 	if len(rows) > avail {

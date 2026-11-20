@@ -85,6 +85,10 @@ var benignLines = []*regexp.Regexp{
 	regexp.MustCompile(`could not notify via target`),
 	regexp.MustCompile(`could not notify via endpoint`),
 	regexp.MustCompile(`no recipients provided`),
+	// Proxmox newer than restic-pve's plug-in was checked against: it warns in every process
+	// that loads storage plug-ins, the dump request's vzdump too; restic-pve info and install
+	// tell the admin to update restic-pve
+	regexp.MustCompile(`^Plugin "PVE::Storage::Custom::ResticPVEPlugin" is implementing an older storage API, an upgrade is recommended$`),
 }
 
 var transientReason = regexp.MustCompile(`(?i)\b(lock|locked|busy|timeout|timed out|temporarily|try again|connection)\b`)

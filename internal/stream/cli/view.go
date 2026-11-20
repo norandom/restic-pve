@@ -51,7 +51,7 @@ func startView(o *backupOptions, ev *eventLog, started time.Time) *blockView {
 	logf := func(msg string) {
 		once.Do(func() { ev.emit(viewLine{Type: "view", Level: "debug", Message: msg}) })
 	}
-	v := &blockView{base: blockmap.State{VMID: o.VMID, Name: o.ViewName, Mode: "full", Status: blockmap.Running,
+	v := &blockView{base: blockmap.State{VMID: o.VMID, Name: o.ViewName, Mode: "full", Kind: blockmap.KindFull, Status: blockmap.Running,
 		Started: started}}
 	v.pub = blockmap.Start(blockmap.Options{Dir: o.ViewDir, VMID: o.VMID, Logf: logf, WriteFile: o.viewWriteFile})
 	first := v.base
