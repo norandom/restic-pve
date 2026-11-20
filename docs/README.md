@@ -38,6 +38,8 @@ project overview, its limits and the two-minute demo are in the [README](../READ
 - [reference/stream-contract.md](reference/stream-contract.md): `stream backup|verify|to-vma|to-raw`,
   flags, stdout and stderr, the result line, exit codes 0 and 2 to 10, the vzdump log table, and
   the piece layout, its manifest (schema 2) and the changes stream with its ack line.
+- [reference/why-cache.md](reference/why-cache.md): why the stream keeps blocks in memory during a
+  guest backup, how much, and what happens when that is not enough.
 - [reference/provider-plugin.md](reference/provider-plugin.md): the Proxmox plug-in for
   changed-block reads, its calls and its tests (built, not yet written to a host).
 - [reference/release-assets.md](reference/release-assets.md): the four files of a release and the
