@@ -161,4 +161,104 @@ line as a non-transient failure. `backup` also writes:
 also has `buffer_ram_peak` and `patch_count`. `consistency` comes once. `vzdump` forwards the
 warn and error lines of the vzdump log only.
 
+## The piece layout (schema 2)
+
+Built, not yet used by any command: the next releases store a guest that reads only its changed
+blocks in this layout instead of one RVS1 file. The code is `internal/pieces`.
+
+A snapshot of the layout is one directory, and every file in it is part of the image:
+
+```
+_manifest.json                    the manifest, first in name order
+config/qemu-server.conf           the guest config, verbatim
+config/qemu-server.fw             the firewall config, when there is one
+disks/<device>/<group>/<index>    the disk in pieces of 4 MiB (4194304 bytes)
+```
+
+- `<group>` is the index divided by 256, four digits; `<index>` is eight digits, both
+  zero-padded: piece 31999 of `drive-scsi0` is `disks/drive-scsi0/0124/00031999`. A disk has at
+  most 10,000 groups (2,560,000 pieces, about 9.8 TiB).
+- Every piece is 4 MiB except the last of a disk, which holds the rest. 4 MiB is the size of
+  Proxmox's change record, so a changed piece can always be read whole from the host.
+- Device names are 1 to 64 characters from `A-Z a-z 0-9 . _ -` and do not start with a dot.
+- restic stores and dumps a directory sorted by name, byte by byte, one path component at a time
+  (so `drive-a/` comes before `drive-a-x/`). `restic dump --archive tar` therefore gives the
+  manifest first, then the config files, then each disk's pieces in order; a test with
+  restic 0.19.1 checks this.
+
+`_manifest.json` (canonical JSON, at most 64 MiB; a 125 GiB disk gives about 2.1 MB):
+
+```json
+{"schema":2,"layout":"pieces","producer":"restic-pve vX.Y.Z","vmid":100,"alias":"web",
+ "created":"2026-11-20T10:00:00Z","kind":"changes","parent":"<64 hex>","piece_size":4194304,
+ "devices":[{"id":1,"name":"drive-scsi0","size":21474836480,"pieces":5120,
+             "sha256pt":"<64 hex>","digests":["<64 hex>","..."]}],
+ "config":[{"name":"qemu-server.conf","sha256":"<64 hex>"}],
+ "qmdump_map":["#qmdump#map:scsi0:drive-scsi0:local:raw:"],
+ "consistency":{"value":"application","detail":""},
+ "record":{"job":"<32 hex>","disks":[{"name":"drive-scsi0","state":"reuse","dirty_bytes":4194304}]}}
+```
+
+| Field | Rule |
+|---|---|
+| `kind` | `changes`, `full` or `check`; `changes` and `check` need a `parent` (a restic snapshot id), `full` may have `null` |
+| `devices` | ids 1 to 254, ascending; `pieces` equals the size divided by 4 MiB, rounded up; one digest per piece |
+| `digests[i]` | SHA-256 of piece i, at its real length, 64 lowercase hex |
+| `sha256pt` | SHA-256 of `"RVS2-PT\x00"`, u64le(size), u64le(4194304), then the 32 raw bytes of each digest in order |
+| `config` | 1 to 16 files, `qemu-server.conf` among them |
+| `qmdump_map` | at most 256 lines starting `#qmdump#map:` (the lines `qmrestore` needs, kept from the last full read) |
+| `record` | the provider job of the run; required for `changes`, where every disk is `reuse`; `null` for a plain full read |
+
+`sha256pt` binds the size, the piece size and every piece. A full read and a changed-blocks run
+of the same disk content give the same value: an unchanged piece adds the parent's digest, a
+read piece the digest of its bytes. A manifest is refused (exit 8) when a field is unknown or
+out of its rule, when anything follows the object, when it is truncated, and when a digest list
+does not give its `sha256pt`; one changed byte in any piece changes `sha256pt`.
+
+## The changes stream
+
+Built, not yet used by any command: `restic-pve request changes` will write it on stdout for one
+Proxmox backup provider job, and the backup machine answers with one ack line on stdin. The code
+is `internal/stream/changes`.
+
+Frames use the RVS1 frame header (64 bytes, magic `RVSF`, CRC-32C of the header) with their own
+type bytes:
+
+| Type | Header fields | Payload (at most) |
+|---|---|---|
+| `C` header | dev 0, offset 0 | JSON `{"format":"RVC1","token","vmid","mode","pve","devices":[{"id","name","size","bitmap","bitmap_name"}]}` (64 KiB) |
+| `G` config | dev 0, offset 0 | u16le name length, name, data: `qemu-server.conf`, then `qemu-server.fw` when present (a VMA blob, 65535 bytes) |
+| `M` map | dev = device id | state byte: 0 no record, 1 record; for 1 a bitset, 1 bit per piece, bit i in byte i/8, lowest bit first, unused bits 0 |
+| `P` piece | dev = device id, offset = piece start | the piece: 4 MiB, or the rest of the disk |
+| `E` end | dev 0, offset 0 | JSON `{"pieces_sent","bytes_sent"}` (4 KiB) |
+
+- `token` is the job's 128-bit token in 32 lowercase hex; `mode` is `probe`, `use` or `new`;
+  `bitmap` is what Proxmox reports per disk: `none`, `new` or `reuse`.
+- Order: the header, the config frames, then for each device in ascending id its map and, in
+  mode `use`, each piece its map marks, in ascending offset; then the end frame.
+- Maps: in mode `use` every map has a record when every disk is `reuse`, and none otherwise; in
+  mode `probe` a disk has a record exactly when it is `reuse`; in mode `new` no disk has one.
+  Pieces are sent only in mode `use`, and then every marked piece exactly once.
+- The end frame's counts must equal the pieces and bytes sent. Nothing follows it; the reader
+  checks that only after it sent the ack, since the host keeps stdout open until then.
+- The reader checks a frame's length against the bound before it reads the payload. A
+  truncated stream, a frame out of order, an offset that is not a multiple of 4 MiB, a map of the
+  wrong length, an unknown field or type and a count that does not add up all end the run with
+  exit 3. Piece contents are not covered by the header CRC; the backup machine checks them with
+  its own digests.
+
+The ack line, at most 1024 bytes with its newline:
+
+```
+ack <token> ok <snapshot-id>      the snapshot (64 hex) was stored, checked and accepted
+ack <token> arm                   mode new, or a disk without record: the record was started
+ack <token> probe                 a probe; nothing was stored
+ack <token> fail <reason>         the backup machine gave up (printable ASCII, 1 to 512 bytes)
+```
+
+The host side lets the provider job succeed only on the one success word that fits the stream:
+`probe` for mode `probe`, `ok` for mode `use` with every disk recorded, `arm` otherwise. `fail`,
+another token, another word, a malformed line and the end of stdin before a whole line all make
+the job fail, so Proxmox keeps its record of every change.
+
 [Back to the index](../README.md)

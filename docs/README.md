@@ -36,7 +36,10 @@ project overview, its limits and the two-minute demo are in the [README](../READ
 - [reference/request-interface.md](reference/request-interface.md): `request ping|info|dump`
   between the machines, the settings file grammar, the SSH and sudo entries, exit codes.
 - [reference/stream-contract.md](reference/stream-contract.md): `stream backup|verify|to-vma|to-raw`,
-  flags, stdout and stderr, the result line, exit codes 0 and 2 to 10, the vzdump log table.
+  flags, stdout and stderr, the result line, exit codes 0 and 2 to 10, the vzdump log table, and
+  the piece layout, its manifest (schema 2) and the changes stream with its ack line.
+- [reference/provider-plugin.md](reference/provider-plugin.md): the Proxmox plug-in for
+  changed-block reads, its calls and its tests (built, not yet written to a host).
 - [reference/release-assets.md](reference/release-assets.md): the four files of a release and the
   `relsign` commands.
 - [reference/build-and-test.md](reference/build-and-test.md): the pinned Go image, vendoring, the
